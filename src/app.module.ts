@@ -7,6 +7,7 @@ import { RedisModule } from './redis/redis.module';
 import { AdminModule } from './admin/admin.module';
 import { InvitaeModule } from './invitae/invitae.module';
 import { AuthModule } from './auth/auth.module';
+import { CryptoModule } from './crypto/crypto.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { AuthModule } from './auth/auth.module';
     }),
     DatabaseModule,
     RedisModule,
+    CryptoModule,
     AuthModule,
     AdminModule,
     InvitaeModule,

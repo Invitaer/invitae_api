@@ -1,20 +1,22 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { DatabaseService } from '../database/database.service';
+import { CryptoService } from '../crypto/crypto.service';
 import { users } from '../database/schema/users.schema';
 import { eq } from 'drizzle-orm';
 
 @Injectable()
 export class AuthService {
   constructor(
-    private db: DatabaseService,
+    private dbService: DatabaseService,
     private jwtService: JwtService,
+    private cryptoService: CryptoService,
   ) {}
 
   async validateUser(email: string, password: string): Promise<any> {
-    const [user] = await this.db.db.select().from(users).where(eq(users.email, email));
+    const [user] = await this.dbService.db.select().from(users).where(eq(users.email, email));
 
-    if (!user || user.password !== password) {
+    if (!user || !(await this.cryptoService.compare(password, user.password))) {
       return null;
     }
 
@@ -41,10 +43,11 @@ export class AuthService {
     };
   }
 
-  async createUser(email: string, password: string, name: string) {
-    const [user] = await this.db.db
+  async register(email: string, password: string, name: string) {
+    const hashedPassword = await this.cryptoService.hash(password);
+    const [user] = await this.dbService.db
       .insert(users)
-      .values({ email, password, name })
+      .values({ email, password: hashedPassword, name })
       .returning();
 
     const { password: _, ...result } = user;

@@ -18,7 +18,6 @@ export const secrets = {
   REDIS_PASSWORD: process.env.REDIS_PASSWORD!,
 
   JWT_SECRET: process.env.JWT_SECRET!,
-  IS_PUBLIC_KEY: process.env.IS_PUBLIC_KEY!,
 
   WHATSAPP_API_URL: process.env.WHATSAPP_API_URL!,
   WHATSAPP_API_TOKEN: process.env.WHATSAPP_API_TOKEN!,

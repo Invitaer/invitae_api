@@ -13,7 +13,6 @@ const SECRETS: SecretConfig[] = [
   { name: 'REDIS_HOST', required: true },
   { name: 'REDIS_PORT', required: true },
   { name: 'JWT_SECRET', required: true },
-  { name: 'IS_PUBLIC_KEY', required: true },
   { name: 'WHATSAPP_API_URL', required: true },
   { name: 'WHATSAPP_API_TOKEN', required: true },
   { name: 'SMS_API_URL', required: true },
