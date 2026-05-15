@@ -10,7 +10,7 @@ services:
     container_name: invitae_postgres
     restart: unless-stopped
     env_file:
-      - ../.env.develop
+      - ../.env
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
