@@ -1,0 +1,25 @@
+version: '3.9'
+
+networks:
+  invitae_net:
+    external: true
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: invitae_app
+    restart: unless-stopped
+    env_file:
+      - ../.env.develop
+    environment:
+      CHOKIDAR_USEPOLLING: "true"
+      WATCHPACK_POLLING: "true"
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      - ../src:/app/src
+      - ../drizzle:/app/drizzle
+    networks:
+      - invitae_net
