@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 echo "Starting all Invitae API services..."
 
-docker compose --env-file .env.develop up -d --build
+docker compose --env-file .env.local up -d --build
 
 echo ""
 echo "All services are up:"

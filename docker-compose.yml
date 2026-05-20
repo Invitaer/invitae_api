@@ -52,6 +52,7 @@ services:
     environment:
       CHOKIDAR_USEPOLLING: "true"
       WATCHPACK_POLLING: "true"
+      REDIS_HOST: invitae_redis # Use the service name as the hostname for Redis when start from docker compose up
     ports:
       - "${PORT:-3000}:3000"
     volumes:

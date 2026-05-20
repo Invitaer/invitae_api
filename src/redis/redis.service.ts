@@ -1,6 +1,6 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
-import Redis from 'ioredis';
-import { secrets } from '../config/secrets';
+import { Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
+import Redis from "ioredis";
+import { secrets } from "../config/secrets";
 
 @Injectable()
 export class RedisService implements OnModuleDestroy {
@@ -22,12 +22,12 @@ export class RedisService implements OnModuleDestroy {
       lazyConnect: false,
     });
 
-    RedisService.instance.on('connect', () => {
-      this.logger.log('Redis singleton connection established');
+    RedisService.instance.on("connect", () => {
+      this.logger.log("Redis singleton connection established");
     });
 
-    RedisService.instance.on('error', (err: Error) => {
-      this.logger.error(`Redis connection error: ${err.message}`);
+    RedisService.instance.on("error", (err: Error) => {
+      this.logger.error(`Redis connection HERE error: ${err.message}`, err.stack);
     });
   }
 
@@ -37,12 +37,11 @@ export class RedisService implements OnModuleDestroy {
 
   async set(key: string, value: string, ttlSeconds?: number): Promise<void> {
     if (ttlSeconds) {
-      await this.client.set(key, value, 'EX', ttlSeconds);
+      await this.client.set(key, value, "EX", ttlSeconds);
     } else {
       await this.client.set(key, value);
     }
   }
-
   async get(key: string): Promise<string | null> {
     return this.client.get(key);
   }
@@ -55,7 +54,7 @@ export class RedisService implements OnModuleDestroy {
     if (RedisService.instance) {
       await RedisService.instance.quit();
       RedisService.instance = null;
-      this.logger.log('Redis connection closed');
+      this.logger.log("Redis connection closed");
     }
   }
 }

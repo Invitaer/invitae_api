@@ -6,6 +6,6 @@ cd "$ROOT_DIR"
 
 echo "Stopping all Invitae API services..."
 
-docker compose --env-file .env.develop down
+docker compose --env-file .env.local down
 
 echo "All services stopped."

@@ -6,6 +6,6 @@ cd "$ROOT_DIR"
 
 echo "Stopping PostgreSQL..."
 
-docker compose -f docker/docker-compose.postgres.yml --env-file .env.develop down
+docker compose -f docker/docker-compose.postgres.yml --env-file .env.local down
 
 echo "PostgreSQL stopped."

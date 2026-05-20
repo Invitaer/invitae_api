@@ -1,9 +1,9 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
-import { DatabaseService } from '../database/database.service';
-import { CryptoService } from '../crypto/crypto.service';
-import { users } from '../database/schema/users.schema';
-import { eq } from 'drizzle-orm';
+import { Injectable, UnauthorizedException } from "@nestjs/common";
+import { JwtService } from "@nestjs/jwt";
+import { DatabaseService } from "../database/database.service";
+import { CryptoService } from "../crypto/crypto.service";
+import { users } from "../database/schema/users.schema";
+import { eq } from "drizzle-orm";
 
 @Injectable()
 export class AuthService {
@@ -14,9 +14,16 @@ export class AuthService {
   ) {}
 
   async validateUser(email: string, password: string): Promise<any> {
-    const [user] = await this.dbService.db.select().from(users).where(eq(users.email, email));
-
-    if (!user || !(await this.cryptoService.compare(password, user.password))) {
+    const [user] = await this.dbService.db
+      .select()
+      .from(users)
+      .where(eq(users.email, email));
+    
+      const comparison = await this.cryptoService.compare(
+      password,
+      user.password,
+    );
+    if (!user || !comparison) {
       return null;
     }
 
@@ -28,7 +35,7 @@ export class AuthService {
     const user = await this.validateUser(email, password);
 
     if (!user) {
-      throw new UnauthorizedException('Invalid credentials');
+      throw new UnauthorizedException("Invalid credentials");
     }
 
     const payload = { sub: user.id, email: user.email };

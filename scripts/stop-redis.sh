@@ -6,6 +6,6 @@ cd "$ROOT_DIR"
 
 echo "Stopping Redis..."
 
-docker compose -f docker/docker-compose.redis.yml --env-file .env.develop down
+docker compose -f docker/docker-compose.redis.yml --env-file .env.local down
 
 echo "Redis stopped."
