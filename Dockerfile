@@ -1,13 +1,15 @@
-FROM node:20-alpine
+FROM node:22-alpine
+
+RUN corepack enable && corepack prepare pnpm@11.2.2 --activate
 
 WORKDIR /app
 
-COPY package.json yarn.lock* ./
+COPY package.json pnpm-lock.yaml* ./
+
+RUN pnpm install --frozen-lockfile --ignore-scripts
 
 COPY . .
 
-RUN yarn install
-
 EXPOSE 3000
 
-CMD ["yarn", "run", "start:dev"]
+CMD ["pnpm", "run", "start:dev"]
