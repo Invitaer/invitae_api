@@ -161,5 +161,85 @@ describe('OAuthService', () => {
       });
       expect(dbServiceMock.db.insert).not.toHaveBeenCalled();
     });
+
+    it('handles email-collision path — when user already exists by email, falls back to select by email', async () => {
+      // Arrange: no existing oauth account, insert returns empty (onConflictDoNothing hit),
+      // fallback select by email returns the existing user
+      const existingUserByEmail = { ...EXISTING_USER, id: 'email-collision-uuid' };
+
+      let selectCallCount = 0;
+      let insertCallCount = 0;
+
+      dbServiceMock.db = {
+        select: jest.fn().mockImplementation(() => {
+          selectCallCount++;
+          const idx = selectCallCount;
+          return {
+            from: jest.fn().mockReturnValue({
+              where: jest.fn().mockImplementation((condition) => {
+                if (idx === 1) {
+                  // First select: oauth_accounts lookup → empty (no existing account)
+                  return Promise.resolve([]);
+                }
+                // Third select: user lookup by email (fallback after conflict)
+                return {
+                  then: jest.fn().mockImplementation((cb: ([u]: unknown[]) => unknown) =>
+                    Promise.resolve(cb([existingUserByEmail])),
+                  ),
+                };
+              }),
+            }),
+          };
+        }),
+        insert: jest.fn().mockImplementation(() => {
+          insertCallCount++;
+          const idx = insertCallCount;
+          if (idx === 1) {
+            // users insert — onConflictDoNothing returns empty (email already taken)
+            return {
+              values: jest.fn().mockReturnValue({
+                onConflictDoNothing: jest.fn().mockReturnValue({
+                  returning: jest.fn().mockResolvedValue([]),
+                }),
+              }),
+            };
+          }
+          // oauth_accounts insert — succeeds
+          return {
+            values: jest.fn().mockResolvedValue(undefined),
+          };
+        }),
+      } as unknown as typeof dbServiceMock.db;
+
+      // Act
+      const result = await service.findOrCreateUser(GOOGLE_PROVIDER, PROVIDER_ID, PROFILE);
+
+      // Assert: returns the user found by email, not a newly created one
+      expect(result).toEqual({
+        id: existingUserByEmail.id,
+        email: existingUserByEmail.email,
+        name: existingUserByEmail.name,
+      });
+      expect(dbServiceMock.db.insert).toHaveBeenCalledTimes(2);
+    });
+
+    it('propagates errors thrown by the database during oauth account lookup', async () => {
+      // Arrange: DB throws on first select (oauth_accounts lookup)
+      const dbError = new Error('DB connection lost');
+
+      dbServiceMock.db = {
+        select: jest.fn().mockReturnValue({
+          from: jest.fn().mockReturnValue({
+            where: jest.fn().mockRejectedValue(dbError),
+          }),
+        }),
+        insert: jest.fn(),
+      } as unknown as typeof dbServiceMock.db;
+
+      // Act & Assert
+      await expect(
+        service.findOrCreateUser(GOOGLE_PROVIDER, PROVIDER_ID, PROFILE),
+      ).rejects.toThrow('DB connection lost');
+    });
   });
 });

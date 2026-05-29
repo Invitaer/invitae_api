@@ -124,4 +124,35 @@ describe('AuthService', () => {
       });
     });
   });
+
+  describe('login()', () => {
+    it('returns access_token and user object when credentials are valid', async () => {
+      // Arrange: validateUser path succeeds
+      dbServiceMock.db = buildMockDb([USER_WITH_PASSWORD]);
+      cryptoServiceMock.compare.mockResolvedValue(true);
+
+      // Act
+      const result = await service.login(USER_WITH_PASSWORD.email, 'plain-password');
+
+      // Assert: shape matches { access_token, user: { id, email, name } }
+      expect(result).toHaveProperty('access_token', 'signed.jwt.token');
+      expect(result).toHaveProperty('user');
+      expect(result.user).toMatchObject({
+        id: USER_WITH_PASSWORD.id,
+        email: USER_WITH_PASSWORD.email,
+        name: USER_WITH_PASSWORD.name,
+      });
+      expect(result.user).not.toHaveProperty('password');
+    });
+
+    it('throws UnauthorizedException when credentials are invalid', async () => {
+      // Arrange: validateUser returns null (wrong password)
+      dbServiceMock.db = buildMockDb([USER_WITH_PASSWORD]);
+      cryptoServiceMock.compare.mockResolvedValue(false);
+
+      // Act & Assert
+      await expect(service.login(USER_WITH_PASSWORD.email, 'wrong-password'))
+        .rejects.toThrow(UnauthorizedException);
+    });
+  });
 });
