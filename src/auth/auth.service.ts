@@ -18,12 +18,21 @@ export class AuthService {
       .select()
       .from(users)
       .where(eq(users.email, email));
-    
-      const comparison = await this.cryptoService.compare(
+
+    if (!user) {
+      return null;
+    }
+
+    if (!user.password) {
+      throw new UnauthorizedException('Use social login');
+    }
+
+    const comparison = await this.cryptoService.compare(
       password,
       user.password,
     );
-    if (!user || !comparison) {
+
+    if (!comparison) {
       return null;
     }
 

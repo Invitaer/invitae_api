@@ -8,7 +8,7 @@ import { ConfirmAttendanceDto } from './dto/confirm-attendance.dto';
 
 @Injectable()
 export class InvitaeService {
-  private readonly INV_PREFIX = 'invitation:';
+  private readonly INV_IDX_PREFIX = 'inv_idx:';
 
   constructor(
     private readonly databaseService: DatabaseService,
@@ -30,7 +30,9 @@ export class InvitaeService {
   }
 
   async getInvitation(slug: string): Promise<InvitationDto> {
-    const raw = await this.redisService.get(`${this.INV_PREFIX}${slug}`);
+    const userId = await this.redisService.get(`${this.INV_IDX_PREFIX}${slug}`);
+    if (!userId) throw new NotFoundException(`Invitation '${slug}' not found`);
+    const raw = await this.redisService.get(`user.${userId}:invitation`);
     if (!raw) throw new NotFoundException(`Invitation '${slug}' not found`);
     return JSON.parse(raw) as InvitationDto;
   }
