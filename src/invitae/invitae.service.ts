@@ -30,9 +30,9 @@ export class InvitaeService {
   }
 
   async getInvitation(slug: string): Promise<InvitationDto> {
-    const userId = await this.redisService.get(`${this.INV_IDX_PREFIX}${slug}`);
-    if (!userId) throw new NotFoundException(`Invitation '${slug}' not found`);
-    const raw = await this.redisService.get(`user.${userId}:invitation`);
+    const eventId = await this.redisService.get(`${this.INV_IDX_PREFIX}${slug}`);
+    if (!eventId) throw new NotFoundException(`Invitation '${slug}' not found`);
+    const raw = await this.redisService.get(`event:${eventId}:invitation`);
     if (!raw) throw new NotFoundException(`Invitation '${slug}' not found`);
     return JSON.parse(raw) as InvitationDto;
   }

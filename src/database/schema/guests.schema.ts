@@ -1,8 +1,10 @@
 import { boolean, pgTable, timestamp, uuid, varchar } from 'drizzle-orm/pg-core';
 import { tables } from './tables.schema';
+import { events } from './events.schema';
 
 export const guests = pgTable('guests', {
   id: uuid('id').defaultRandom().primaryKey(),
+  eventId: uuid('event_id').notNull().references(() => events.id, { onDelete: 'cascade' }),
   name: varchar('name', { length: 255 }).notNull(),
   phone: varchar('phone', { length: 20 }).notNull(),
   email: varchar('email', { length: 255 }),
