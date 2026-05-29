@@ -7,59 +7,72 @@ import {
   HttpStatus,
   Param,
   Post,
+  UseGuards,
 } from '@nestjs/common';
 import { ContentService } from './content.service';
 import { SetContentDto } from './dto/set-content.dto';
 import { InvitationDto } from './dto/invitation.dto';
 import { Auth } from '../../auth/decorators/authenticated.decorator';
-import { CurrentUser } from '../../auth/decorators/current-user.decorator';
+import { CurrentEvent } from '../events/decorators/current-event.decorator';
+import { EventOwnerGuard } from '../events/guards/event-owner.guard';
+import { Event } from '../../database/schema';
 
-@Controller('admin/content')
+@Controller('admin/events/:eventId/content')
 @Auth()
+@UseGuards(EventOwnerGuard)
 export class ContentController {
   constructor(private readonly contentService: ContentService) {}
 
   // ── Generic key-value ────────────────────────────────────────────────────
 
   @Get()
-  getAllKeys(): Promise<string[]> {
-    return this.contentService.getAllKeys();
+  getAllKeys(@CurrentEvent() event: Event): Promise<string[]> {
+    return this.contentService.getAllKeys(event.id);
   }
 
   @Get(':key')
-  getContent(@Param('key') key: string): Promise<{ key: string; value: string | null }> {
-    return this.contentService.getContent(key);
+  getContent(
+    @CurrentEvent() event: Event,
+    @Param('key') key: string,
+  ): Promise<{ key: string; value: string | null }> {
+    return this.contentService.getContent(event.id, key);
   }
 
   @Post()
-  setContent(@Body() dto: SetContentDto): Promise<{ key: string; value: string }> {
-    return this.contentService.setContent(dto.key, dto.value);
+  setContent(
+    @CurrentEvent() event: Event,
+    @Body() dto: SetContentDto,
+  ): Promise<{ key: string; value: string }> {
+    return this.contentService.setContent(event.id, dto.key, dto.value);
   }
 
   @Delete(':key')
   @HttpCode(HttpStatus.NO_CONTENT)
-  deleteContent(@Param('key') key: string): Promise<void> {
-    return this.contentService.deleteContent(key);
+  deleteContent(
+    @CurrentEvent() event: Event,
+    @Param('key') key: string,
+  ): Promise<void> {
+    return this.contentService.deleteContent(event.id, key);
   }
 
-  // ── Invitation (1 per user) ──────────────────────────────────────────────
+  // ── Invitation (1 per event — eventId-keyed Redis) ────────────────────────
 
   @Post('invitation')
   setInvitation(
-    @CurrentUser() user: { id: string },
+    @CurrentEvent() event: Event,
     @Body() dto: InvitationDto,
   ): Promise<InvitationDto> {
-    return this.contentService.setInvitation(user.id, dto);
+    return this.contentService.setInvitation(event.id, dto);
   }
 
   @Get('invitation')
-  getInvitation(@CurrentUser() user: { id: string }): Promise<InvitationDto> {
-    return this.contentService.getInvitation(user.id);
+  getInvitation(@CurrentEvent() event: Event): Promise<InvitationDto> {
+    return this.contentService.getInvitation(event.id);
   }
 
   @Delete('invitation')
   @HttpCode(HttpStatus.NO_CONTENT)
-  deleteInvitation(@CurrentUser() user: { id: string }): Promise<void> {
-    return this.contentService.deleteInvitation(user.id);
+  deleteInvitation(@CurrentEvent() event: Event): Promise<void> {
+    return this.contentService.deleteInvitation(event.id);
   }
 }

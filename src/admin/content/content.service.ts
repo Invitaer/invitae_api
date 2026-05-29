@@ -4,39 +4,44 @@ import { InvitationDto } from './dto/invitation.dto';
 
 @Injectable()
 export class ContentService {
-  private readonly PREFIX = 'content:';
+  private readonly CONTENT_PREFIX = 'content:';
   private readonly INV_IDX_PREFIX = 'inv_idx:';
 
   constructor(private readonly redisService: RedisService) {}
 
-  private invKey(userId: string): string {
-    return `user.${userId}:invitation`;
+  private invKey(eventId: string): string {
+    return `event:${eventId}:invitation`;
   }
 
-  async getAllKeys(): Promise<string[]> {
-    const keys = await this.redisService.client.keys(`${this.PREFIX}*`);
-    return keys.map((k) => k.replace(this.PREFIX, ''));
+  private contentKey(eventId: string, key: string): string {
+    return `${this.CONTENT_PREFIX}${eventId}:${key}`;
   }
 
-  async getContent(key: string): Promise<{ key: string; value: string | null }> {
-    const value = await this.redisService.get(`${this.PREFIX}${key}`);
+  async getAllKeys(eventId: string): Promise<string[]> {
+    const prefix = `${this.CONTENT_PREFIX}${eventId}:`;
+    const keys = await this.redisService.client.keys(`${prefix}*`);
+    return keys.map((k) => k.replace(prefix, ''));
+  }
+
+  async getContent(eventId: string, key: string): Promise<{ key: string; value: string | null }> {
+    const value = await this.redisService.get(this.contentKey(eventId, key));
     return { key, value };
   }
 
-  async setContent(key: string, value: string): Promise<{ key: string; value: string }> {
-    await this.redisService.set(`${this.PREFIX}${key}`, value);
+  async setContent(eventId: string, key: string, value: string): Promise<{ key: string; value: string }> {
+    await this.redisService.set(this.contentKey(eventId, key), value);
     return { key, value };
   }
 
-  async deleteContent(key: string): Promise<void> {
-    await this.redisService.del(`${this.PREFIX}${key}`);
+  async deleteContent(eventId: string, key: string): Promise<void> {
+    await this.redisService.del(this.contentKey(eventId, key));
   }
 
-  async setInvitation(userId: string, dto: InvitationDto): Promise<InvitationDto> {
+  async setInvitation(eventId: string, dto: InvitationDto): Promise<InvitationDto> {
     const newSlug = dto.metadata.slug;
 
-    // If the user already has an invitation with a different slug, remove the old index
-    const existing = await this.redisService.get(this.invKey(userId));
+    // If the event already has an invitation with a different slug, remove the old index
+    const existing = await this.redisService.get(this.invKey(eventId));
     if (existing) {
       const oldSlug = (JSON.parse(existing) as InvitationDto).metadata.slug;
       if (oldSlug !== newSlug) {
@@ -44,24 +49,24 @@ export class ContentService {
       }
     }
 
-    await this.redisService.set(this.invKey(userId), JSON.stringify(dto));
-    await this.redisService.set(`${this.INV_IDX_PREFIX}${newSlug}`, userId);
-    Logger.log(`setInvitation: userId=${userId} slug=${newSlug}`);
+    await this.redisService.set(this.invKey(eventId), JSON.stringify(dto));
+    await this.redisService.set(`${this.INV_IDX_PREFIX}${newSlug}`, eventId);
+    Logger.log(`setInvitation: eventId=${eventId} slug=${newSlug}`);
     return dto;
   }
 
-  async getInvitation(userId: string): Promise<InvitationDto> {
-    const raw = await this.redisService.get(this.invKey(userId));
-    if (!raw) throw new NotFoundException(`Invitation for user '${userId}' not found`);
+  async getInvitation(eventId: string): Promise<InvitationDto> {
+    const raw = await this.redisService.get(this.invKey(eventId));
+    if (!raw) throw new NotFoundException(`Invitation for event '${eventId}' not found`);
     return JSON.parse(raw) as InvitationDto;
   }
 
-  async deleteInvitation(userId: string): Promise<void> {
-    const raw = await this.redisService.get(this.invKey(userId));
+  async deleteInvitation(eventId: string): Promise<void> {
+    const raw = await this.redisService.get(this.invKey(eventId));
     if (raw) {
       const slug = (JSON.parse(raw) as InvitationDto).metadata.slug;
       await this.redisService.del(`${this.INV_IDX_PREFIX}${slug}`);
     }
-    await this.redisService.del(this.invKey(userId));
+    await this.redisService.del(this.invKey(eventId));
   }
 }
