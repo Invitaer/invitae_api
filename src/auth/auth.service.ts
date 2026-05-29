@@ -18,17 +18,30 @@ export class AuthService {
       .select()
       .from(users)
       .where(eq(users.email, email));
-    
-      const comparison = await this.cryptoService.compare(
+
+    if (!user) {
+      return null;
+    }
+
+    if (!user.password) {
+      throw new UnauthorizedException('Use social login');
+    }
+
+    const comparison = await this.cryptoService.compare(
       password,
       user.password,
     );
-    if (!user || !comparison) {
+
+    if (!comparison) {
       return null;
     }
 
     const { password: _, ...result } = user;
     return result;
+  }
+
+  issueJwt(user: { id: string; email: string; name: string }): string {
+    return this.jwtService.sign({ sub: user.id, email: user.email, name: user.name });
   }
 
   async login(email: string, password: string) {
@@ -38,10 +51,8 @@ export class AuthService {
       throw new UnauthorizedException("Invalid credentials");
     }
 
-    const payload = { sub: user.id, email: user.email };
-
     return {
-      access_token: this.jwtService.sign(payload),
+      access_token: this.issueJwt(user),
       user: {
         id: user.id,
         email: user.email,

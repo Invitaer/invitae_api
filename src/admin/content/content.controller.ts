@@ -12,6 +12,7 @@ import { ContentService } from './content.service';
 import { SetContentDto } from './dto/set-content.dto';
 import { InvitationDto } from './dto/invitation.dto';
 import { Auth } from '../../auth/decorators/authenticated.decorator';
+import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 
 @Controller('admin/content')
 @Auth()
@@ -41,21 +42,24 @@ export class ContentController {
     return this.contentService.deleteContent(key);
   }
 
-  // ── Invitations ──────────────────────────────────────────────────────────
+  // ── Invitation (1 per user) ──────────────────────────────────────────────
 
   @Post('invitation')
-  setInvitation(@Body() dto: InvitationDto): Promise<InvitationDto> {
-    return this.contentService.setInvitation(dto);
+  setInvitation(
+    @CurrentUser() user: { id: string },
+    @Body() dto: InvitationDto,
+  ): Promise<InvitationDto> {
+    return this.contentService.setInvitation(user.id, dto);
   }
 
-  @Get('invitation/:slug')
-  getInvitation(@Param('slug') slug: string): Promise<InvitationDto> {
-    return this.contentService.getInvitation(slug);
+  @Get('invitation')
+  getInvitation(@CurrentUser() user: { id: string }): Promise<InvitationDto> {
+    return this.contentService.getInvitation(user.id);
   }
 
-  @Delete('invitation/:slug')
+  @Delete('invitation')
   @HttpCode(HttpStatus.NO_CONTENT)
-  deleteInvitation(@Param('slug') slug: string): Promise<void> {
-    return this.contentService.deleteInvitation(slug);
+  deleteInvitation(@CurrentUser() user: { id: string }): Promise<void> {
+    return this.contentService.deleteInvitation(user.id);
   }
 }

@@ -27,3 +27,5 @@ drizzle/migrations/meta/
 # temp directory
 .temp
 .tmp
+.atl
+
