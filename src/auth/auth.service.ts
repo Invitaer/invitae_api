@@ -40,6 +40,10 @@ export class AuthService {
     return result;
   }
 
+  issueJwt(user: { id: string; email: string; name: string }): string {
+    return this.jwtService.sign({ sub: user.id, email: user.email, name: user.name });
+  }
+
   async login(email: string, password: string) {
     const user = await this.validateUser(email, password);
 
@@ -47,10 +51,8 @@ export class AuthService {
       throw new UnauthorizedException("Invalid credentials");
     }
 
-    const payload = { sub: user.id, email: user.email };
-
     return {
-      access_token: this.jwtService.sign(payload),
+      access_token: this.issueJwt(user),
       user: {
         id: user.id,
         email: user.email,
