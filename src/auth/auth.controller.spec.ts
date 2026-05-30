@@ -31,6 +31,7 @@ const MOCK_AUTH_USER: AuthUser = {
 };
 
 const MOCK_JWT = 'mock.signed.jwt.token';
+const DASHBOARD_URL = 'http://localhost:8090';
 
 // --- Mock AuthService ---
 
@@ -64,6 +65,7 @@ describe('AuthController — OAuth callback integration', () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    process.env.DASHBOARD_URL = DASHBOARD_URL;
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AuthController],
@@ -82,25 +84,28 @@ describe('AuthController — OAuth callback integration', () => {
   });
 
   afterEach(async () => {
+    delete process.env.DASHBOARD_URL;
     await app.close();
   });
 
   describe('GET /auth/google/callback', () => {
-    it('returns { access_token } when guard injects a known AuthUser', async () => {
-      // Act
+    it('redirects to dashboard callback with token', async () => {
       const response = await request(app.getHttpServer())
         .get('/auth/google/callback')
-        .expect(200);
+        .redirects(0)
+        .expect(302);
 
-      // Assert
-      expect(response.body).toEqual({ access_token: MOCK_JWT });
+      expect(response.headers['location']).toBe(
+        `${DASHBOARD_URL}/api/auth/callback/google?token=${MOCK_JWT}`,
+      );
       expect(mockAuthService.issueJwt).toHaveBeenCalledWith(MOCK_AUTH_USER);
     });
 
     it('calls issueJwt with the user set by the guard', async () => {
       await request(app.getHttpServer())
         .get('/auth/google/callback')
-        .expect(200);
+        .redirects(0)
+        .expect(302);
 
       expect(mockAuthService.issueJwt).toHaveBeenCalledTimes(1);
       expect(mockAuthService.issueJwt).toHaveBeenCalledWith(
@@ -111,18 +116,37 @@ describe('AuthController — OAuth callback integration', () => {
         }),
       );
     });
+
+    it('does not return a JSON body', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/auth/google/callback')
+        .redirects(0)
+        .expect(302);
+
+      expect(response.body).not.toHaveProperty('access_token');
+    });
   });
 
   describe('GET /auth/facebook/callback', () => {
-    it('returns { access_token } when guard injects a known AuthUser', async () => {
-      // Act
+    it('redirects to dashboard callback with token', async () => {
       const response = await request(app.getHttpServer())
         .get('/auth/facebook/callback')
-        .expect(200);
+        .redirects(0)
+        .expect(302);
 
-      // Assert
-      expect(response.body).toEqual({ access_token: MOCK_JWT });
+      expect(response.headers['location']).toBe(
+        `${DASHBOARD_URL}/api/auth/callback/facebook?token=${MOCK_JWT}`,
+      );
       expect(mockAuthService.issueJwt).toHaveBeenCalledWith(MOCK_AUTH_USER);
+    });
+
+    it('does not return a JSON body', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/auth/facebook/callback')
+        .redirects(0)
+        .expect(302);
+
+      expect(response.body).not.toHaveProperty('access_token');
     });
   });
 });

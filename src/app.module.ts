@@ -13,6 +13,7 @@ import { CryptoModule } from './crypto/crypto.module';
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
+      envFilePath: ['.env.local', '.env'],
     }),
     DatabaseModule,
     RedisModule,
