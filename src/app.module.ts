@@ -5,6 +5,8 @@ import { AppService } from './app.service';
 import { DatabaseModule } from './database/database.module';
 import { RedisModule } from './redis/redis.module';
 import { AdminModule } from './admin/admin.module';
+import { AdminUsersModule } from './admin/users/admin-users.module';
+import { UserEventsModule } from './user/events/user-events.module';
 import { InvitaeModule } from './invitae/invitae.module';
 import { AuthModule } from './auth/auth.module';
 import { CryptoModule } from './crypto/crypto.module';
@@ -20,6 +22,8 @@ import { CryptoModule } from './crypto/crypto.module';
     CryptoModule,
     AuthModule,
     AdminModule,
+    AdminUsersModule,
+    UserEventsModule,
     InvitaeModule,
   ],
   controllers: [AppController],

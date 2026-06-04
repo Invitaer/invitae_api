@@ -19,6 +19,8 @@ const mockEvent = {
   slug: 'my-wedding-2025',
   date: new Date('2025-10-10'),
   createdAt: new Date(),
+  eventType: 'general',
+  location: null as string | null,
 };
 
 function buildMockDb(rows: unknown[] = []) {
@@ -36,6 +38,49 @@ function buildMockDb(rows: unknown[] = []) {
     update: jest.fn().mockReturnValue({ set }),
     delete: jest.fn().mockReturnValue({ where: deleteWhere }),
     _internals: { returning, mutationWhere, set, values, deleteWhere, selectWhere, from },
+  };
+}
+
+/**
+ * Build a mock DB that handles two insert calls: first for events, second for eventUsers.
+ * eventRows — rows returned by the events INSERT
+ * eventUserInsertValues — spy that captures what was inserted into event_users
+ */
+function buildMockDbForUserIds(eventRows: unknown[] = []) {
+  const eventUsersReturning = jest.fn().mockResolvedValue([]);
+  const eventUsersValues = jest.fn().mockReturnValue({ returning: eventUsersReturning });
+
+  const eventsReturning = jest.fn().mockResolvedValue(eventRows);
+  const eventsValues = jest.fn().mockReturnValue({ returning: eventsReturning });
+
+  const deleteReturning = jest.fn().mockResolvedValue([]);
+  const deleteWhere = jest.fn().mockReturnValue({ returning: deleteReturning });
+
+  // insert is called twice: first for events, second for event_users
+  const insertMock = jest.fn()
+    .mockReturnValueOnce({ values: eventsValues })
+    .mockReturnValueOnce({ values: eventUsersValues });
+
+  const selectWhere = jest.fn().mockResolvedValue(eventRows);
+  const from = jest.fn().mockReturnValue({ where: selectWhere });
+
+  const mutationWhere = jest.fn().mockReturnValue({ returning: eventsReturning });
+  const set = jest.fn().mockReturnValue({ where: mutationWhere });
+
+  return {
+    select: jest.fn().mockReturnValue({ from }),
+    insert: insertMock,
+    update: jest.fn().mockReturnValue({ set }),
+    delete: jest.fn().mockReturnValue({ where: deleteWhere }),
+    _internals: {
+      insertMock,
+      eventsValues,
+      eventsReturning,
+      eventUsersValues,
+      eventUsersReturning,
+      deleteWhere,
+      deleteReturning,
+    },
   };
 }
 
@@ -64,6 +109,7 @@ describe('EventsService', () => {
         name: 'My Wedding',
         slug: 'my-wedding-2025',
         date: '2025-10-10',
+        eventType: 'wedding',
       });
 
       expect(result).toEqual(mockEvent);
@@ -84,6 +130,7 @@ describe('EventsService', () => {
           name: 'My Wedding',
           slug: 'my-wedding-2025',
           date: '2025-10-10',
+          eventType: 'wedding',
         }),
       ).rejects.toThrow(ConflictException);
     });
@@ -105,6 +152,7 @@ describe('EventsService', () => {
           name: 'My Wedding',
           slug: 'my-wedding-2025',
           date: '2025-10-10',
+          eventType: 'wedding',
         }),
       ).rejects.toThrow(ConflictException);
     });
@@ -146,6 +194,34 @@ describe('EventsService', () => {
     });
   });
 
+  describe('findOne — ownership filter', () => {
+    it('should return the event when userId matches (ownership check passes)', async () => {
+      dbServiceMock.db = buildMockDb([mockEvent]);
+
+      const result = await service.findOne('event-uuid-1', 'user-uuid-1');
+
+      expect(result).toEqual(mockEvent);
+    });
+
+    it('should throw NotFoundException when userId does not match (ownership check fails)', async () => {
+      // mock returns empty array — as if DB found no row with (id AND userId)
+      dbServiceMock.db = buildMockDb([]);
+
+      await expect(
+        service.findOne('event-uuid-1', 'different-user-id'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('should return event without ownership filter when userId is not provided (backward compat)', async () => {
+      dbServiceMock.db = buildMockDb([mockEvent]);
+
+      const result = await service.findOne('event-uuid-1');
+
+      expect(result).toEqual(mockEvent);
+      expect(result.id).toBe('event-uuid-1');
+    });
+  });
+
   describe('update', () => {
     it('should return the updated event when owner calls update', async () => {
       const updatedEvent = { ...mockEvent, name: 'Updated Name' };
@@ -184,6 +260,142 @@ describe('EventsService', () => {
       await expect(
         service.remove('event-uuid-1', 'different-user-id'),
       ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('create — userIds sync', () => {
+    it('should bulk-insert event_users rows when userIds is provided and non-empty', async () => {
+      const mockDb = buildMockDbForUserIds([mockEvent]);
+      dbServiceMock.db = mockDb as any;
+
+      await service.create('user-uuid-1', {
+        name: 'My Wedding',
+        slug: 'my-wedding-2025',
+        date: '2025-10-10',
+        eventType: 'wedding',
+        userIds: ['uid-1', 'uid-2'],
+      });
+
+      // insert was called twice: once for events, once for event_users
+      expect(mockDb._internals.insertMock).toHaveBeenCalledTimes(2);
+
+      // second insert received the mapped event_users rows
+      const eventUsersPayload = mockDb._internals.eventUsersValues.mock.calls[0][0] as Array<{ eventId: string; userId: string }>;
+      expect(eventUsersPayload).toHaveLength(2);
+      expect(eventUsersPayload[0]).toMatchObject({ eventId: mockEvent.id, userId: 'uid-1' });
+      expect(eventUsersPayload[1]).toMatchObject({ eventId: mockEvent.id, userId: 'uid-2' });
+    });
+
+    it('should NOT insert event_users rows when userIds is absent', async () => {
+      const mockDb = buildMockDbForUserIds([mockEvent]);
+      dbServiceMock.db = mockDb as any;
+
+      await service.create('user-uuid-1', {
+        name: 'My Wedding',
+        slug: 'my-wedding-2025',
+        date: '2025-10-10',
+        eventType: 'wedding',
+      });
+
+      // insert called only once (for events); no event_users insert
+      expect(mockDb._internals.insertMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('should NOT insert event_users rows when userIds is an empty array', async () => {
+      const mockDb = buildMockDbForUserIds([mockEvent]);
+      dbServiceMock.db = mockDb as any;
+
+      await service.create('user-uuid-1', {
+        name: 'My Wedding',
+        slug: 'my-wedding-2025',
+        date: '2025-10-10',
+        eventType: 'wedding',
+        userIds: [],
+      });
+
+      expect(mockDb._internals.insertMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('update — userIds replace-set', () => {
+    it('should delete-then-insert event_users when userIds is provided', async () => {
+      const updatedEvent = { ...mockEvent, name: 'Updated' };
+
+      // For update scenario: db.update() returns event, db.delete() clears, db.insert() re-inserts
+      const eventUsersReturning = jest.fn().mockResolvedValue([]);
+      const eventUsersValues = jest.fn().mockReturnValue({ returning: eventUsersReturning });
+      const insertMock = jest.fn().mockReturnValue({ values: eventUsersValues });
+
+      const deleteReturning = jest.fn().mockResolvedValue([]);
+      const deleteWhere = jest.fn().mockReturnValue({ returning: deleteReturning });
+
+      const updateReturning = jest.fn().mockResolvedValue([updatedEvent]);
+      const updateMutWhere = jest.fn().mockReturnValue({ returning: updateReturning });
+      const updateSet = jest.fn().mockReturnValue({ where: updateMutWhere });
+
+      const mockDb = {
+        insert: insertMock,
+        update: jest.fn().mockReturnValue({ set: updateSet }),
+        delete: jest.fn().mockReturnValue({ where: deleteWhere }),
+        select: jest.fn(),
+        _internals: { insertMock, eventUsersValues, deleteWhere },
+      };
+      dbServiceMock.db = mockDb as any;
+
+      await service.update('event-uuid-1', 'user-uuid-1', {
+        name: 'Updated',
+        userIds: ['uid-new'],
+      });
+
+      // delete called for event_users
+      expect(mockDb.delete).toHaveBeenCalledTimes(1);
+      // insert called once for event_users re-insertion
+      expect(insertMock).toHaveBeenCalledTimes(1);
+      const insertPayload = eventUsersValues.mock.calls[0][0] as Array<{ eventId: string; userId: string }>;
+      expect(insertPayload).toHaveLength(1);
+      expect(insertPayload[0]).toMatchObject({ eventId: 'event-uuid-1', userId: 'uid-new' });
+    });
+
+    it('should delete all event_users but NOT re-insert when userIds is empty array', async () => {
+      const updatedEvent = { ...mockEvent };
+
+      const deleteReturning = jest.fn().mockResolvedValue([]);
+      const deleteWhere = jest.fn().mockReturnValue({ returning: deleteReturning });
+
+      const updateReturning = jest.fn().mockResolvedValue([updatedEvent]);
+      const updateMutWhere = jest.fn().mockReturnValue({ returning: updateReturning });
+      const updateSet = jest.fn().mockReturnValue({ where: updateMutWhere });
+
+      const insertMock = jest.fn();
+      const mockDb = {
+        insert: insertMock,
+        update: jest.fn().mockReturnValue({ set: updateSet }),
+        delete: jest.fn().mockReturnValue({ where: deleteWhere }),
+        select: jest.fn(),
+      };
+      dbServiceMock.db = mockDb as any;
+
+      await service.update('event-uuid-1', 'user-uuid-1', {
+        name: 'Same',
+        userIds: [],
+      });
+
+      // delete called once
+      expect(mockDb.delete).toHaveBeenCalledTimes(1);
+      // insert NOT called (no users to re-insert)
+      expect(insertMock).toHaveBeenCalledTimes(0);
+    });
+
+    it('should NOT touch event_users when userIds is undefined', async () => {
+      const mockDb = buildMockDb([mockEvent]);
+      dbServiceMock.db = mockDb as any;
+
+      await service.update('event-uuid-1', 'user-uuid-1', {
+        name: 'No change to users',
+      });
+
+      expect(mockDb.delete).not.toHaveBeenCalled();
+      expect(mockDb.insert).not.toHaveBeenCalled();
     });
   });
 });

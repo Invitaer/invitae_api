@@ -120,7 +120,7 @@ describe('EventsController — integration', () => {
   });
 
   describe('GET /admin/events/:id', () => {
-    it('returns 200 with the event', async () => {
+    it('returns 200 with the event when owner requests it', async () => {
       mockEventsService.findOne.mockResolvedValueOnce(MOCK_EVENT);
 
       const response = await request(app.getHttpServer())
@@ -128,6 +128,10 @@ describe('EventsController — integration', () => {
         .expect(200);
 
       expect(response.body).toMatchObject({ id: 'event-uuid-1' });
+      expect(mockEventsService.findOne).toHaveBeenCalledWith(
+        'event-uuid-1',
+        MOCK_USER.id,
+      );
     });
 
     it('returns 404 when event does not exist', async () => {
@@ -137,6 +141,16 @@ describe('EventsController — integration', () => {
 
       await request(app.getHttpServer())
         .get('/admin/events/nonexistent-id')
+        .expect(404);
+    });
+
+    it('returns 404 when authenticated user does not own the event', async () => {
+      mockEventsService.findOne.mockRejectedValueOnce(
+        new NotFoundException('Event not found'),
+      );
+
+      await request(app.getHttpServer())
+        .get('/admin/events/event-uuid-1')
         .expect(404);
     });
   });

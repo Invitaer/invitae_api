@@ -9,6 +9,8 @@ export const events = pgTable('events', {
   name: varchar('name', { length: 255 }).notNull(),
   slug: varchar('slug', { length: 255 }).notNull().unique(),
   date: timestamp('date').notNull(),
+  eventType: varchar('event_type', { length: 100 }).notNull(),
+  location: varchar('location', { length: 255 }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 

@@ -37,8 +37,11 @@ export class EventsController {
   }
 
   @Get(':id')
-  findOne(@Param('id') id: string): Promise<Event> {
-    return this.eventsService.findOne(id);
+  findOne(
+    @Param('id') id: string,
+    @CurrentUser() user: AuthUser,
+  ): Promise<Event> {
+    return this.eventsService.findOne(id, user.id);
   }
 
   @Patch(':id')

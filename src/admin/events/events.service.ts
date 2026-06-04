@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import { DatabaseService } from '../../database/database.service';
-import { events, Event, NewEvent } from '../../database/schema';
+import { eventUsers, events, Event, NewEvent } from '../../database/schema';
 import { CreateEventDto } from './dto/create-event.dto';
 import { UpdateEventDto } from './dto/update-event.dto';
 
@@ -22,8 +22,18 @@ export class EventsService {
           name: dto.name,
           slug: dto.slug,
           date: new Date(dto.date),
+          eventType: dto.eventType,
+          location: dto.location,
         } as NewEvent)
         .returning();
+
+      if (dto.userIds?.length) {
+        await this.databaseService.db
+          .insert(eventUsers)
+          .values(dto.userIds.map((uid) => ({ eventId: event.id, userId: uid })))
+          .returning();
+      }
+
       return event;
     } catch (error: any) {
       if (
@@ -43,11 +53,15 @@ export class EventsService {
       .where(eq(events.userId, userId));
   }
 
-  async findOne(id: string): Promise<Event> {
+  async findOne(id: string, userId?: string): Promise<Event> {
+    const whereClause = userId
+      ? and(eq(events.id, id), eq(events.userId, userId))
+      : eq(events.id, id);
+
     const [event] = await this.databaseService.db
       .select()
       .from(events)
-      .where(eq(events.id, id));
+      .where(whereClause);
 
     if (!event) throw new NotFoundException(`Event ${id} not found`);
     return event;
@@ -62,6 +76,8 @@ export class EventsService {
     if (dto.name !== undefined) updateValues.name = dto.name;
     if (dto.slug !== undefined) updateValues.slug = dto.slug;
     if (dto.date !== undefined) updateValues.date = new Date(dto.date);
+    if (dto.eventType !== undefined) updateValues.eventType = dto.eventType;
+    if (dto.location !== undefined) updateValues.location = dto.location;
 
     const [event] = await this.databaseService.db
       .update(events)
@@ -70,6 +86,20 @@ export class EventsService {
       .returning();
 
     if (!event) throw new NotFoundException(`Event ${id} not found`);
+
+    if (dto.userIds !== undefined) {
+      await this.databaseService.db
+        .delete(eventUsers)
+        .where(eq(eventUsers.eventId, id));
+
+      if (dto.userIds.length) {
+        await this.databaseService.db
+          .insert(eventUsers)
+          .values(dto.userIds.map((uid) => ({ eventId: id, userId: uid })))
+          .returning();
+      }
+    }
+
     return event;
   }
 
