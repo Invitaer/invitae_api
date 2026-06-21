@@ -19,8 +19,8 @@ import { UpdateGuestDto } from './dto/update-guest.dto';
 import { GuestsService } from './guests.service';
 
 @Controller('admin/events/:eventId/guests')
-@Auth()
 @UseGuards(EventOwnerGuard)
+@Auth()
 export class GuestsController {
   constructor(private readonly guestsService: GuestsService) {}
 

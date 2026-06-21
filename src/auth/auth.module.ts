@@ -5,7 +5,9 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './jwt.strategy';
 import { GoogleStrategy } from './strategies/google.strategy';
+import { GoogleUserStrategy } from './strategies/google-user.strategy';
 import { FacebookStrategy } from './strategies/facebook.strategy';
+import { FacebookUserStrategy } from './strategies/facebook-user.strategy';
 import { OAuthService } from './oauth.service';
 import { DatabaseModule } from '../database/database.module';
 import { CryptoModule } from '../crypto/crypto.module';
@@ -22,7 +24,7 @@ import { secrets } from '../config/secrets';
     CryptoModule,
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, GoogleStrategy, FacebookStrategy, OAuthService],
+  providers: [AuthService, JwtStrategy, GoogleStrategy, GoogleUserStrategy, FacebookStrategy, FacebookUserStrategy, OAuthService],
   exports: [AuthService],
 })
 export class AuthModule {}

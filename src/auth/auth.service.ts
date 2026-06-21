@@ -24,7 +24,7 @@ export class AuthService {
     }
 
     if (!user.password) {
-      throw new UnauthorizedException('Use social login');
+      throw new UnauthorizedException("Use social login");
     }
 
     const comparison = await this.cryptoService.compare(
@@ -41,7 +41,11 @@ export class AuthService {
   }
 
   issueJwt(user: { id: string; email: string; name: string }): string {
-    return this.jwtService.sign({ sub: user.id, email: user.email, name: user.name });
+    return this.jwtService.sign({
+      sub: user.id,
+      email: user.email,
+      name: user.name,
+    });
   }
 
   async login(email: string, password: string) {

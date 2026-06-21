@@ -32,6 +32,7 @@ const MOCK_AUTH_USER: AuthUser = {
 
 const MOCK_JWT = 'mock.signed.jwt.token';
 const DASHBOARD_URL = 'http://localhost:8090';
+const USER_DASHBOARD_URL = 'http://localhost:8091';
 
 // --- Mock AuthService ---
 
@@ -66,6 +67,7 @@ describe('AuthController — OAuth callback integration', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     process.env.DASHBOARD_URL = DASHBOARD_URL;
+    process.env.USER_DASHBOARD_URL = USER_DASHBOARD_URL;
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AuthController],
@@ -75,7 +77,11 @@ describe('AuthController — OAuth callback integration', () => {
     })
       .overrideGuard(AuthGuard('google'))
       .useClass(MockGoogleGuard)
+      .overrideGuard(AuthGuard('google-user'))
+      .useClass(MockGoogleGuard)
       .overrideGuard(AuthGuard('facebook'))
+      .useClass(MockFacebookGuard)
+      .overrideGuard(AuthGuard('facebook-user'))
       .useClass(MockFacebookGuard)
       .compile();
 
@@ -85,6 +91,7 @@ describe('AuthController — OAuth callback integration', () => {
 
   afterEach(async () => {
     delete process.env.DASHBOARD_URL;
+    delete process.env.USER_DASHBOARD_URL;
     await app.close();
   });
 
@@ -147,6 +154,82 @@ describe('AuthController — OAuth callback integration', () => {
         .expect(302);
 
       expect(response.body).not.toHaveProperty('access_token');
+    });
+  });
+
+  describe('GET /auth/google/user/callback', () => {
+    it('redirects to user_dashboard callback with token', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/auth/google/user/callback')
+        .redirects(0)
+        .expect(302);
+
+      expect(response.headers['location']).toBe(
+        `${USER_DASHBOARD_URL}/api/auth/callback/google?token=${MOCK_JWT}`,
+      );
+      expect(mockAuthService.issueJwt).toHaveBeenCalledWith(MOCK_AUTH_USER);
+    });
+
+    it('calls issueJwt with the user set by the guard', async () => {
+      await request(app.getHttpServer())
+        .get('/auth/google/user/callback')
+        .redirects(0)
+        .expect(302);
+
+      expect(mockAuthService.issueJwt).toHaveBeenCalledTimes(1);
+      expect(mockAuthService.issueJwt).toHaveBeenCalledWith(
+        expect.objectContaining({ id: MOCK_AUTH_USER.id }),
+      );
+    });
+  });
+
+  describe('GET /auth/facebook/user/callback', () => {
+    it('redirects to user_dashboard callback with token', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/auth/facebook/user/callback')
+        .redirects(0)
+        .expect(302);
+
+      expect(response.headers['location']).toBe(
+        `${USER_DASHBOARD_URL}/api/auth/callback/facebook?token=${MOCK_JWT}`,
+      );
+      expect(mockAuthService.issueJwt).toHaveBeenCalledWith(MOCK_AUTH_USER);
+    });
+  });
+
+  describe('USER_DASHBOARD_URL fallback', () => {
+    it('falls back to http://localhost:8091 when USER_DASHBOARD_URL is not set', async () => {
+      delete process.env.USER_DASHBOARD_URL;
+      // Reinitialize app WITHOUT USER_DASHBOARD_URL set
+      await app.close();
+
+      const module = await Test.createTestingModule({
+        controllers: [AuthController],
+        providers: [
+          { provide: AuthService, useValue: mockAuthService },
+        ],
+      })
+        .overrideGuard(AuthGuard('google'))
+        .useClass(MockGoogleGuard)
+        .overrideGuard(AuthGuard('google-user'))
+        .useClass(MockGoogleGuard)
+        .overrideGuard(AuthGuard('facebook'))
+        .useClass(MockFacebookGuard)
+        .overrideGuard(AuthGuard('facebook-user'))
+        .useClass(MockFacebookGuard)
+        .compile();
+
+      const freshApp = module.createNestApplication();
+      await freshApp.init();
+
+      const response = await request(freshApp.getHttpServer())
+        .get('/auth/google/user/callback')
+        .redirects(0)
+        .expect(302);
+
+      expect(response.headers['location']).toContain('http://localhost:8091');
+
+      await freshApp.close();
     });
   });
 });

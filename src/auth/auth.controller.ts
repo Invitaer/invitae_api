@@ -20,9 +20,10 @@ export class AuthController {
   private readonly dashboardUrl =
     process.env.DASHBOARD_URL ?? "http://localhost:8090";
 
-  constructor(
-    private authService: AuthService,
-  ) {}
+  private readonly userDashboardUrl =
+    process.env.USER_DASHBOARD_URL ?? "http://localhost:8091";
+
+  constructor(private authService: AuthService) {}
 
   @Post("login")
   async login(@Body() dto: LoginDto) {
@@ -34,6 +35,8 @@ export class AuthController {
   async register(@Body() dto: RegisterDto) {
     return this.authService.register(dto.email, dto.password, dto.name);
   }
+
+  // --- Admin dashboard OAuth routes ---
 
   @Get("google")
   @UseGuards(AuthGuard("google"))
@@ -64,6 +67,40 @@ export class AuthController {
     const token = this.authService.issueJwt(user);
     return res.redirect(
       `${this.dashboardUrl}/api/auth/callback/facebook?token=${token}`,
+    );
+  }
+
+  // --- User dashboard OAuth routes ---
+
+  @Get("google/user")
+  @UseGuards(AuthGuard("google-user"))
+  @HttpCode(200)
+  googleUserAuth() {
+    // Passport redirects to Google — this handler is never reached
+  }
+
+  @Get("google/user/callback")
+  @UseGuards(AuthGuard("google-user"))
+  googleUserCallback(@CurrentUser() user: AuthUser, @Res() res: Response) {
+    const token = this.authService.issueJwt(user);
+    return res.redirect(
+      `${this.userDashboardUrl}/api/auth/callback/google?token=${token}`,
+    );
+  }
+
+  @Get("facebook/user")
+  @UseGuards(AuthGuard("facebook-user"))
+  @HttpCode(200)
+  facebookUserAuth() {
+    // Passport redirects to Facebook — this handler is never reached
+  }
+
+  @Get("facebook/user/callback")
+  @UseGuards(AuthGuard("facebook-user"))
+  facebookUserCallback(@CurrentUser() user: AuthUser, @Res() res: Response) {
+    const token = this.authService.issueJwt(user);
+    return res.redirect(
+      `${this.userDashboardUrl}/api/auth/callback/facebook?token=${token}`,
     );
   }
 }
