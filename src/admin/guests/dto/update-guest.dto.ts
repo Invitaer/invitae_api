@@ -1,4 +1,5 @@
-import { IsBoolean, IsEmail, IsOptional, IsString, IsUUID } from 'class-validator';
+import { IsBoolean, IsEmail, IsEnum, IsOptional, IsString, IsUUID } from 'class-validator';
+import { RsvpStatus } from '../../../database/schema/guests.schema';
 
 export class UpdateGuestDto {
   @IsString()
@@ -20,4 +21,8 @@ export class UpdateGuestDto {
   @IsBoolean()
   @IsOptional()
   invitationSent?: boolean;
+
+  @IsEnum(RsvpStatus)
+  @IsOptional()
+  rsvpStatus?: RsvpStatus;
 }

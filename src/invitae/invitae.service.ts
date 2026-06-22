@@ -19,7 +19,7 @@ export class InvitaeService {
     const [guest] = await this.databaseService.db
       .update(guests)
       .set({
-        attendanceConfirmed: dto.attending,
+        rsvpStatus: dto.attending ? 'ACCEPTED' : 'DECLINED',
         updatedAt: new Date(),
       })
       .where(eq(guests.id, dto.guestId))

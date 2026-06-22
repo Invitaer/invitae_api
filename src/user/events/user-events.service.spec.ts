@@ -174,3 +174,103 @@ describe('UserEventsService', () => {
     });
   });
 });
+
+// -----------------------------------------------------------------------
+// T1.11 — findOne + getStats specs
+// -----------------------------------------------------------------------
+
+describe('UserEventsService — findOne', () => {
+  function buildFindOneMockDb(rows: unknown[]) {
+    const selectWhere = jest.fn().mockResolvedValue(rows);
+    const innerJoin = jest.fn().mockReturnValue({ where: selectWhere });
+    const from = jest.fn().mockReturnValue({ innerJoin });
+    return { select: jest.fn().mockReturnValue({ from }) };
+  }
+
+  it('returns the event when user is a member', async () => {
+    const db = buildFindOneMockDb([mockEvent]);
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        UserEventsService,
+        { provide: DatabaseService, useValue: { db } },
+      ],
+    }).compile();
+    const svc = module.get<UserEventsService>(UserEventsService);
+
+    const result = await svc.findOne('event-uuid-1', 'user-uuid-1');
+    expect(result).toEqual(mockEvent);
+  });
+
+  it('throws NotFoundException when event is not found / user is not a member', async () => {
+    const db = buildFindOneMockDb([]);
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        UserEventsService,
+        { provide: DatabaseService, useValue: { db } },
+      ],
+    }).compile();
+    const svc = module.get<UserEventsService>(UserEventsService);
+
+    await expect(svc.findOne('event-uuid-1', 'user-uuid-99')).rejects.toThrow(
+      NotFoundException,
+    );
+  });
+});
+
+describe('UserEventsService — getStats', () => {
+  // Drizzle sql<number> aggregates return strings from the pg driver
+  const statsRow = { total: '6', accepted: '3', declined: '2', pending: '1' };
+
+  function buildStatsMockDb(rows: unknown[]) {
+    const selectWhere = jest.fn().mockResolvedValue(rows);
+    const from = jest.fn().mockReturnValue({ where: selectWhere });
+    return { select: jest.fn().mockReturnValue({ from }) };
+  }
+
+  it('returns computed stats with correct totals when guests exist', async () => {
+    const db = buildStatsMockDb([statsRow]);
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        UserEventsService,
+        { provide: DatabaseService, useValue: { db } },
+      ],
+    }).compile();
+    const svc = module.get<UserEventsService>(UserEventsService);
+
+    const result = await svc.getStats('event-uuid-1');
+
+    expect(result).toEqual({
+      total: 6,
+      confirmed: 5,   // accepted + declined
+      notConfirmed: 1, // pending
+      accepted: 3,
+      notAccepted: 2,  // declined
+    });
+  });
+
+  it('returns all zeros for an empty event', async () => {
+    const emptyRow = { total: '0', accepted: '0', declined: '0', pending: '0' };
+    const db = buildStatsMockDb([emptyRow]);
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        UserEventsService,
+        { provide: DatabaseService, useValue: { db } },
+      ],
+    }).compile();
+    const svc = module.get<UserEventsService>(UserEventsService);
+
+    const result = await svc.getStats('event-uuid-1');
+
+    expect(result).toEqual({
+      total: 0,
+      confirmed: 0,
+      notConfirmed: 0,
+      accepted: 0,
+      notAccepted: 0,
+    });
+  });
+});

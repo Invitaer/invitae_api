@@ -14,6 +14,7 @@ import { AuthGuard } from '@nestjs/passport';
 import * as request from 'supertest';
 import { UserEventsController } from './user-events.controller';
 import { UserEventsService } from './user-events.service';
+import { UserEventMemberGuard } from './guards/user-event-member.guard';
 import { AuthUser } from '../../auth/interfaces/auth-user.interface';
 
 const MOCK_USER: AuthUser = {
@@ -50,6 +51,8 @@ class RejectJwtGuard {
 const mockUserEventsService = {
   findByUser: jest.fn(),
   update: jest.fn(),
+  findOne: jest.fn(),
+  getStats: jest.fn(),
 };
 
 describe('UserEventsController — authenticated', () => {
@@ -66,6 +69,8 @@ describe('UserEventsController — authenticated', () => {
     })
       .overrideGuard(AuthGuard('jwt'))
       .useClass(MockJwtGuard)
+      .overrideGuard(UserEventMemberGuard)
+      .useValue({ canActivate: () => true })
       .compile();
 
     app = module.createNestApplication();
@@ -156,6 +161,8 @@ describe('UserEventsController — unauthenticated', () => {
     })
       .overrideGuard(AuthGuard('jwt'))
       .useClass(RejectJwtGuard)
+      .overrideGuard(UserEventMemberGuard)
+      .useValue({ canActivate: () => false })
       .compile();
 
     app = module.createNestApplication();
@@ -176,6 +183,119 @@ describe('UserEventsController — unauthenticated', () => {
     await request(app.getHttpServer())
       .patch('/user/events/event-uuid-1')
       .send({ name: 'Updated' })
+      .expect(403);
+  });
+});
+
+// -----------------------------------------------------------------------
+// T1.13 — GET :id and GET :id/stats controller tests
+// -----------------------------------------------------------------------
+
+const MOCK_STATS = {
+  total: 6,
+  confirmed: 5,
+  notConfirmed: 1,
+  accepted: 3,
+  notAccepted: 2,
+};
+
+describe('UserEventsController — GET :id + GET :id/stats (member)', () => {
+  let app: INestApplication;
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+
+    const module: TestingModule = await Test.createTestingModule({
+      controllers: [UserEventsController],
+      providers: [
+        { provide: UserEventsService, useValue: mockUserEventsService },
+      ],
+    })
+      .overrideGuard(AuthGuard('jwt'))
+      .useClass(MockJwtGuard)
+      .overrideGuard(UserEventMemberGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+
+    app = module.createNestApplication();
+    await app.init();
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  it('GET /user/events/:id returns 200 with event object for member', async () => {
+    mockUserEventsService.findOne.mockResolvedValueOnce(MOCK_EVENT);
+
+    const response = await request(app.getHttpServer())
+      .get('/user/events/event-uuid-1')
+      .expect(200);
+
+    expect(response.body).toMatchObject({ id: MOCK_EVENT.id });
+    expect(mockUserEventsService.findOne).toHaveBeenCalledWith(
+      'event-uuid-1',
+      MOCK_USER.id,
+    );
+  });
+
+  it('GET /user/events/:id returns 404 when event does not exist', async () => {
+    mockUserEventsService.findOne.mockRejectedValueOnce(
+      new NotFoundException('Event not found'),
+    );
+
+    await request(app.getHttpServer())
+      .get('/user/events/nonexistent-id')
+      .expect(404);
+  });
+
+  it('GET /user/events/:id/stats returns 200 with stats object for member', async () => {
+    mockUserEventsService.getStats.mockResolvedValueOnce(MOCK_STATS);
+
+    const response = await request(app.getHttpServer())
+      .get('/user/events/event-uuid-1/stats')
+      .expect(200);
+
+    expect(response.body).toEqual(MOCK_STATS);
+    expect(mockUserEventsService.getStats).toHaveBeenCalledWith('event-uuid-1');
+  });
+});
+
+describe('UserEventsController — GET :id + GET :id/stats (non-member / unauthenticated)', () => {
+  let app: INestApplication;
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+
+    const module: TestingModule = await Test.createTestingModule({
+      controllers: [UserEventsController],
+      providers: [
+        { provide: UserEventsService, useValue: mockUserEventsService },
+      ],
+    })
+      .overrideGuard(AuthGuard('jwt'))
+      .useClass(RejectJwtGuard)
+      .overrideGuard(UserEventMemberGuard)
+      .useValue({ canActivate: () => false })
+      .compile();
+
+    app = module.createNestApplication();
+    await app.init();
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  it('GET /user/events/:id returns 403 when JWT guard rejects (unauthenticated)', async () => {
+    await request(app.getHttpServer())
+      .get('/user/events/event-uuid-1')
+      .expect(403);
+  });
+
+  it('GET /user/events/:id/stats returns 403 when JWT guard rejects (unauthenticated)', async () => {
+    await request(app.getHttpServer())
+      .get('/user/events/event-uuid-1/stats')
       .expect(403);
   });
 });

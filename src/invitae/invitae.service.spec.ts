@@ -29,6 +29,7 @@ const mockRedisService = {
 
 const EVENT_ID = 'event-uuid-1';
 const SLUG = 'boda-2025';
+const GUEST_ID = 'guest-uuid-1';
 
 const MOCK_INVITATION: InvitationDto = {
   metadata: { slug: SLUG, eventType: 'wedding', language: 'es' },
@@ -38,6 +39,33 @@ const MOCK_INVITATION: InvitationDto = {
   sections: [],
 };
 
+const MOCK_GUEST_BASE = {
+  id: GUEST_ID,
+  eventId: EVENT_ID,
+  name: 'Alice',
+  phone: '123456789',
+  email: null,
+  tableId: null,
+  invitationSent: false,
+  createdAt: new Date(),
+  updatedAt: new Date(),
+};
+
+// --- buildMockDb for DatabaseService ---
+
+function buildMockDb(rows: unknown[] = []) {
+  const returning = jest.fn().mockResolvedValue(rows);
+  const mutationWhere = jest.fn().mockReturnValue({ returning });
+  const set = jest.fn().mockReturnValue({ where: mutationWhere });
+
+  return {
+    select: jest.fn(),
+    insert: jest.fn(),
+    update: jest.fn().mockReturnValue({ set }),
+    delete: jest.fn(),
+  };
+}
+
 describe('InvitaeService — slug → eventId resolution', () => {
   let service: InvitaeService;
 
@@ -46,7 +74,7 @@ describe('InvitaeService — slug → eventId resolution', () => {
       providers: [
         InvitaeService,
         { provide: RedisService, useValue: mockRedisService },
-        DatabaseService,
+        { provide: DatabaseService, useValue: { db: buildMockDb() } },
       ],
     }).compile();
 
@@ -93,5 +121,66 @@ describe('InvitaeService — slug → eventId resolution', () => {
       const hasOldKeyPattern = allGetCalls.some(([key]) => key.startsWith('user.'));
       expect(hasOldKeyPattern).toBe(false);
     });
+  });
+});
+
+describe('InvitaeService — confirmAttendance', () => {
+  let service: InvitaeService;
+  let dbMock: ReturnType<typeof buildMockDb>;
+
+  beforeEach(async () => {
+    dbMock = buildMockDb();
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        InvitaeService,
+        { provide: RedisService, useValue: mockRedisService },
+        { provide: DatabaseService, useValue: { db: dbMock } },
+      ],
+    }).compile();
+
+    service = module.get<InvitaeService>(InvitaeService);
+    jest.clearAllMocks();
+  });
+
+  it('attending: true → sets rsvpStatus = ACCEPTED', async () => {
+    const mockGuest = { ...MOCK_GUEST_BASE, rsvpStatus: 'ACCEPTED' };
+    const returning = jest.fn().mockResolvedValue([mockGuest]);
+    const mutationWhere = jest.fn().mockReturnValue({ returning });
+    const set = jest.fn().mockReturnValue({ where: mutationWhere });
+    dbMock.update = jest.fn().mockReturnValue({ set });
+
+    const result = await service.confirmAttendance({ guestId: GUEST_ID, attending: true });
+
+    expect(set).toHaveBeenCalledWith(
+      expect.objectContaining({ rsvpStatus: 'ACCEPTED' }),
+    );
+    expect(result.rsvpStatus).toBe('ACCEPTED');
+  });
+
+  it('attending: false → sets rsvpStatus = DECLINED', async () => {
+    const mockGuest = { ...MOCK_GUEST_BASE, rsvpStatus: 'DECLINED' };
+    const returning = jest.fn().mockResolvedValue([mockGuest]);
+    const mutationWhere = jest.fn().mockReturnValue({ returning });
+    const set = jest.fn().mockReturnValue({ where: mutationWhere });
+    dbMock.update = jest.fn().mockReturnValue({ set });
+
+    const result = await service.confirmAttendance({ guestId: GUEST_ID, attending: false });
+
+    expect(set).toHaveBeenCalledWith(
+      expect.objectContaining({ rsvpStatus: 'DECLINED' }),
+    );
+    expect(result.rsvpStatus).toBe('DECLINED');
+  });
+
+  it('throws NotFoundException when guest is not found', async () => {
+    const returning = jest.fn().mockResolvedValue([]);
+    const mutationWhere = jest.fn().mockReturnValue({ returning });
+    const set = jest.fn().mockReturnValue({ where: mutationWhere });
+    dbMock.update = jest.fn().mockReturnValue({ set });
+
+    await expect(
+      service.confirmAttendance({ guestId: 'nonexistent', attending: true }),
+    ).rejects.toThrow(NotFoundException);
   });
 });

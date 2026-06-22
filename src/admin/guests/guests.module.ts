@@ -7,5 +7,6 @@ import { GuestsService } from './guests.service';
   imports: [EventsModule],
   controllers: [GuestsController],
   providers: [GuestsService],
+  exports: [GuestsService],
 })
 export class GuestsModule {}

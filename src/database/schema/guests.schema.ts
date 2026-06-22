@@ -1,6 +1,14 @@
-import { boolean, pgTable, timestamp, uuid, varchar } from 'drizzle-orm/pg-core';
+import { pgEnum, pgTable, timestamp, uuid, varchar, boolean } from 'drizzle-orm/pg-core';
 import { tables } from './tables.schema';
 import { events } from './events.schema';
+
+export enum RsvpStatus {
+  PENDING  = 'PENDING',
+  ACCEPTED = 'ACCEPTED',
+  DECLINED = 'DECLINED',
+}
+
+export const rsvpStatusEnum = pgEnum('rsvp_status', ['PENDING', 'ACCEPTED', 'DECLINED']);
 
 export const guests = pgTable('guests', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -9,7 +17,7 @@ export const guests = pgTable('guests', {
   phone: varchar('phone', { length: 20 }).notNull(),
   email: varchar('email', { length: 255 }),
   tableId: uuid('table_id').references(() => tables.id),
-  attendanceConfirmed: boolean('attendance_confirmed').default(false),
+  rsvpStatus: rsvpStatusEnum('rsvp_status').notNull().default('PENDING'),
   invitationSent: boolean('invitation_sent').default(false),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
