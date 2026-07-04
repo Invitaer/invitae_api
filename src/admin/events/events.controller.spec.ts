@@ -31,6 +31,9 @@ const MOCK_EVENT = {
   slug: 'my-wedding-2025',
   date: new Date('2025-10-10').toISOString(),
   createdAt: new Date().toISOString(),
+  users: [
+    { id: 'user-uuid-alice', name: 'Alice', email: 'alice@test.com' },
+  ],
 };
 
 // --- Mock guard that injects user into request ---
@@ -115,6 +118,7 @@ describe('EventsController — integration', () => {
 
       expect(response.body).toHaveLength(1);
       expect(response.body[0]).toMatchObject({ userId: MOCK_USER.id });
+      expect(response.body[0].users).toEqual(MOCK_EVENT.users);
       expect(mockEventsService.findAll).toHaveBeenCalledWith(MOCK_USER.id);
     });
   });
@@ -128,6 +132,7 @@ describe('EventsController — integration', () => {
         .expect(200);
 
       expect(response.body).toMatchObject({ id: 'event-uuid-1' });
+      expect(response.body.users).toEqual(MOCK_EVENT.users);
       expect(mockEventsService.findOne).toHaveBeenCalledWith(
         'event-uuid-1',
         MOCK_USER.id,

@@ -16,6 +16,7 @@ import { Event } from '../../database/schema';
 import { CreateEventDto } from './dto/create-event.dto';
 import { UpdateEventDto } from './dto/update-event.dto';
 import { EventsService } from './events.service';
+import { EventWithUsers } from './events.types';
 
 @Controller('admin/events')
 @Auth()
@@ -32,7 +33,7 @@ export class EventsController {
   }
 
   @Get()
-  findAll(@CurrentUser() user: AuthUser): Promise<Event[]> {
+  findAll(@CurrentUser() user: AuthUser): Promise<EventWithUsers[]> {
     return this.eventsService.findAll(user.id);
   }
 
@@ -40,7 +41,7 @@ export class EventsController {
   findOne(
     @Param('id') id: string,
     @CurrentUser() user: AuthUser,
-  ): Promise<Event> {
+  ): Promise<EventWithUsers> {
     return this.eventsService.findOne(id, user.id);
   }
 

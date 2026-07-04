@@ -1,4 +1,4 @@
-import { pgEnum, pgTable, timestamp, uuid, varchar, boolean } from 'drizzle-orm/pg-core';
+import { pgEnum, pgTable, timestamp, uuid, varchar, boolean, integer } from 'drizzle-orm/pg-core';
 import { tables } from './tables.schema';
 import { events } from './events.schema';
 
@@ -17,6 +17,8 @@ export const guests = pgTable('guests', {
   phone: varchar('phone', { length: 20 }).notNull(),
   email: varchar('email', { length: 255 }),
   tableId: uuid('table_id').references(() => tables.id),
+  tickets: integer('tickets').notNull().default(1),
+  tableNumber: integer('table_number'),
   rsvpStatus: rsvpStatusEnum('rsvp_status').notNull().default('PENDING'),
   invitationSent: boolean('invitation_sent').default(false),
   createdAt: timestamp('created_at').defaultNow().notNull(),

@@ -6,9 +6,11 @@
  *   - rsvpStatus column is present in the schema
  *   - attendanceConfirmed column is NOT present
  *   - RsvpStatus enum exports the expected UPPERCASE values
+ *   - tickets and tableNumber columns are present
  */
 
 import { guests, RsvpStatus } from './guests.schema';
+import { guestPhones } from './guest-phones.schema';
 
 describe('guests schema — rsvp_status column', () => {
   it('guests table has rsvpStatus column definition', () => {
@@ -31,5 +33,25 @@ describe('guests schema — rsvp_status column', () => {
 
   it('RsvpStatus enum has DECLINED value', () => {
     expect(RsvpStatus.DECLINED).toBe('DECLINED');
+  });
+
+  it('guests table has tickets column definition', () => {
+    const columns = Object.keys(guests);
+    expect(columns).toContain('tickets');
+  });
+
+  it('guests table has tableNumber column definition', () => {
+    const columns = Object.keys(guests);
+    expect(columns).toContain('tableNumber');
+  });
+});
+
+describe('guest_phones schema', () => {
+  it('guestPhones table has guestId column', () => {
+    expect(Object.keys(guestPhones)).toContain('guestId');
+  });
+
+  it('guestPhones table has phone column', () => {
+    expect(Object.keys(guestPhones)).toContain('phone');
   });
 });

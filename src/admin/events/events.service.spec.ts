@@ -23,14 +23,48 @@ const mockEvent = {
   location: null as string | null,
 };
 
+const mockEventB = {
+  id: 'event-uuid-2',
+  userId: 'user-uuid-1',
+  name: 'Corporate Gala',
+  slug: 'corporate-gala-2025',
+  date: new Date('2025-11-01'),
+  createdAt: new Date(),
+  eventType: 'general',
+  location: null as string | null,
+};
+
+const mockAlice = {
+  id: 'user-uuid-alice',
+  name: 'Alice',
+  email: 'alice@test.com',
+};
+const mockBob = { id: 'user-uuid-bob', name: 'Bob', email: 'bob@test.com' };
+const mockCarol = {
+  id: 'user-uuid-carol',
+  name: 'Carol',
+  email: 'carol@test.com',
+};
+
+/**
+ * Builds a mock DatabaseService.
+ *
+ * For the read path (select), `rows` are the raw joined rows returned by
+ * `from().leftJoin().leftJoin().where()`, shaped as `{ event, assignedUser }`
+ * (`assignedUser` is `null` when there is no matching `eventUsers` row).
+ * `leftJoin` self-chains so the mock supports any number of joins.
+ */
 function buildMockDb(rows: unknown[] = []) {
   const returning = jest.fn().mockResolvedValue(rows);
   const mutationWhere = jest.fn().mockReturnValue({ returning });
   const set = jest.fn().mockReturnValue({ where: mutationWhere });
   const values = jest.fn().mockReturnValue({ returning });
   const deleteWhere = jest.fn().mockReturnValue({ returning });
+
   const selectWhere = jest.fn().mockResolvedValue(rows);
-  const from = jest.fn().mockReturnValue({ where: selectWhere });
+  const selectChain: any = { where: selectWhere };
+  selectChain.leftJoin = jest.fn().mockReturnValue(selectChain);
+  const from = jest.fn().mockReturnValue(selectChain);
 
   return {
     select: jest.fn().mockReturnValue({ from }),
@@ -159,12 +193,12 @@ describe('EventsService', () => {
   });
 
   describe('findAll', () => {
-    it('should return only events belonging to the given userId', async () => {
-      dbServiceMock.db = buildMockDb([mockEvent]);
+    it('should return an event with an empty users array when it has no assigned users', async () => {
+      dbServiceMock.db = buildMockDb([{ event: mockEvent, assignedUser: null }]);
 
       const result = await service.findAll('user-uuid-1');
 
-      expect(result).toEqual([mockEvent]);
+      expect(result).toEqual([{ ...mockEvent, users: [] }]);
     });
 
     it('should return empty array when user has no events', async () => {
@@ -174,15 +208,62 @@ describe('EventsService', () => {
 
       expect(result).toEqual([]);
     });
+
+    it('should group multiple assigned users into a single event', async () => {
+      dbServiceMock.db = buildMockDb([
+        { event: mockEvent, assignedUser: mockAlice },
+        { event: mockEvent, assignedUser: mockBob },
+      ]);
+
+      const result = await service.findAll('user-uuid-1');
+
+      expect(result).toEqual([{ ...mockEvent, users: [mockAlice, mockBob] }]);
+    });
+
+    it('should group joined rows into separate events by event id', async () => {
+      dbServiceMock.db = buildMockDb([
+        { event: mockEvent, assignedUser: mockAlice },
+        { event: mockEvent, assignedUser: mockBob },
+        { event: mockEventB, assignedUser: mockCarol },
+      ]);
+
+      const result = await service.findAll('user-uuid-1');
+
+      expect(result).toEqual([
+        { ...mockEvent, users: [mockAlice, mockBob] },
+        { ...mockEventB, users: [mockCarol] },
+      ]);
+    });
   });
 
   describe('findOne', () => {
-    it('should return the event when found', async () => {
-      dbServiceMock.db = buildMockDb([mockEvent]);
+    it('should return the event with users when found', async () => {
+      dbServiceMock.db = buildMockDb([
+        { event: mockEvent, assignedUser: mockAlice },
+      ]);
 
       const result = await service.findOne('event-uuid-1');
 
-      expect(result).toEqual(mockEvent);
+      expect(result).toEqual({ ...mockEvent, users: [mockAlice] });
+    });
+
+    it('should return the event with an empty users array when it has no assigned users', async () => {
+      dbServiceMock.db = buildMockDb([{ event: mockEvent, assignedUser: null }]);
+
+      const result = await service.findOne('event-uuid-1');
+
+      expect(result).toEqual({ ...mockEvent, users: [] });
+    });
+
+    it('should group multiple assigned users for a single event', async () => {
+      dbServiceMock.db = buildMockDb([
+        { event: mockEvent, assignedUser: mockAlice },
+        { event: mockEvent, assignedUser: mockBob },
+      ]);
+
+      const result = await service.findOne('event-uuid-1');
+
+      expect(result).toEqual({ ...mockEvent, users: [mockAlice, mockBob] });
     });
 
     it('should throw NotFoundException when event does not exist', async () => {
@@ -196,11 +277,13 @@ describe('EventsService', () => {
 
   describe('findOne — ownership filter', () => {
     it('should return the event when userId matches (ownership check passes)', async () => {
-      dbServiceMock.db = buildMockDb([mockEvent]);
+      dbServiceMock.db = buildMockDb([
+        { event: mockEvent, assignedUser: mockAlice },
+      ]);
 
       const result = await service.findOne('event-uuid-1', 'user-uuid-1');
 
-      expect(result).toEqual(mockEvent);
+      expect(result).toEqual({ ...mockEvent, users: [mockAlice] });
     });
 
     it('should throw NotFoundException when userId does not match (ownership check fails)', async () => {
@@ -213,11 +296,11 @@ describe('EventsService', () => {
     });
 
     it('should return event without ownership filter when userId is not provided (backward compat)', async () => {
-      dbServiceMock.db = buildMockDb([mockEvent]);
+      dbServiceMock.db = buildMockDb([{ event: mockEvent, assignedUser: null }]);
 
       const result = await service.findOne('event-uuid-1');
 
-      expect(result).toEqual(mockEvent);
+      expect(result).toEqual({ ...mockEvent, users: [] });
       expect(result.id).toBe('event-uuid-1');
     });
   });

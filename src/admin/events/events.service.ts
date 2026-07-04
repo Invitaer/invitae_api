@@ -5,9 +5,43 @@ import {
 } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import { DatabaseService } from '../../database/database.service';
-import { eventUsers, events, Event, NewEvent } from '../../database/schema';
+import {
+  eventUsers,
+  events,
+  users,
+  Event,
+  NewEvent,
+} from '../../database/schema';
 import { CreateEventDto } from './dto/create-event.dto';
 import { UpdateEventDto } from './dto/update-event.dto';
+import { AssignedUser, EventWithUsers } from './events.types';
+
+interface JoinedEventUserRow {
+  event: Event;
+  assignedUser: AssignedUser | null;
+}
+
+/**
+ * Groups joined `events -> eventUsers -> users` rows into one EventWithUsers
+ * entry per distinct event id, preserving row order. Rows with a null
+ * `assignedUser` (leftJoin miss) contribute no user but keep the event.
+ */
+function groupRowsByEvent(rows: JoinedEventUserRow[]): EventWithUsers[] {
+  const grouped = new Map<string, EventWithUsers>();
+
+  for (const row of rows) {
+    let entry = grouped.get(row.event.id);
+    if (!entry) {
+      entry = { ...row.event, users: [] };
+      grouped.set(row.event.id, entry);
+    }
+    if (row.assignedUser?.id) {
+      entry.users.push(row.assignedUser);
+    }
+  }
+
+  return Array.from(grouped.values());
+}
 
 @Injectable()
 export class EventsService {
@@ -46,22 +80,36 @@ export class EventsService {
     }
   }
 
-  findAll(userId: string): Promise<Event[]> {
-    return this.databaseService.db
-      .select()
+  async findAll(userId: string): Promise<EventWithUsers[]> {
+    const rows = await this.databaseService.db
+      .select({
+        event: events,
+        assignedUser: { id: users.id, name: users.name, email: users.email },
+      })
       .from(events)
+      .leftJoin(eventUsers, eq(eventUsers.eventId, events.id))
+      .leftJoin(users, eq(users.id, eventUsers.userId))
       .where(eq(events.userId, userId));
+
+    return groupRowsByEvent(rows as JoinedEventUserRow[]);
   }
 
-  async findOne(id: string, userId?: string): Promise<Event> {
+  async findOne(id: string, userId?: string): Promise<EventWithUsers> {
     const whereClause = userId
       ? and(eq(events.id, id), eq(events.userId, userId))
       : eq(events.id, id);
 
-    const [event] = await this.databaseService.db
-      .select()
+    const rows = await this.databaseService.db
+      .select({
+        event: events,
+        assignedUser: { id: users.id, name: users.name, email: users.email },
+      })
       .from(events)
+      .leftJoin(eventUsers, eq(eventUsers.eventId, events.id))
+      .leftJoin(users, eq(users.id, eventUsers.userId))
       .where(whereClause);
+
+    const [event] = groupRowsByEvent(rows as JoinedEventUserRow[]);
 
     if (!event) throw new NotFoundException(`Event ${id} not found`);
     return event;
