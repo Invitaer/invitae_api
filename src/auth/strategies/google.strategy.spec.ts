@@ -11,6 +11,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { GoogleStrategy } from './google.strategy';
 import { OAuthService } from '../oauth.service';
 import { AuthUser } from '../interfaces/auth-user.interface';
+import { UserRole } from '../../database/schema';
 
 const mockOAuthService = {
   findOrCreateUser: jest.fn(),
@@ -47,6 +48,7 @@ describe('GoogleStrategy', () => {
       id: 'user-uuid-1',
       email: 'test@example.com',
       name: 'Test User',
+      role: UserRole.USER,
     };
 
     it('should call oauthService.findOrCreateUser with provider google and correct args', async () => {

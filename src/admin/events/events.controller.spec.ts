@@ -15,6 +15,7 @@ import * as request from 'supertest';
 import { EventsController } from './events.controller';
 import { EventsService } from './events.service';
 import { AuthUser } from '../../auth/interfaces/auth-user.interface';
+import { UserRole } from '../../database/schema';
 
 // --- Fixtures ---
 
@@ -22,6 +23,7 @@ const MOCK_USER: AuthUser = {
   id: 'user-uuid-1',
   email: 'owner@test.com',
   name: 'Owner',
+  role: UserRole.USER,
 };
 
 const MOCK_EVENT = {
@@ -119,7 +121,10 @@ describe('EventsController — integration', () => {
       expect(response.body).toHaveLength(1);
       expect(response.body[0]).toMatchObject({ userId: MOCK_USER.id });
       expect(response.body[0].users).toEqual(MOCK_EVENT.users);
-      expect(mockEventsService.findAll).toHaveBeenCalledWith(MOCK_USER.id);
+      expect(mockEventsService.findAll).toHaveBeenCalledWith(
+        MOCK_USER.id,
+        MOCK_USER.role,
+      );
     });
   });
 
@@ -136,6 +141,7 @@ describe('EventsController — integration', () => {
       expect(mockEventsService.findOne).toHaveBeenCalledWith(
         'event-uuid-1',
         MOCK_USER.id,
+        MOCK_USER.role,
       );
     });
 

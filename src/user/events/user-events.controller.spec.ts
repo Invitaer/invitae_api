@@ -16,11 +16,13 @@ import { UserEventsController } from './user-events.controller';
 import { UserEventsService } from './user-events.service';
 import { UserEventMemberGuard } from './guards/user-event-member.guard';
 import { AuthUser } from '../../auth/interfaces/auth-user.interface';
+import { UserRole } from '../../database/schema';
 
 const MOCK_USER: AuthUser = {
   id: 'user-uuid-1',
   email: 'user@test.com',
   name: 'User',
+  role: UserRole.USER,
 };
 
 const MOCK_EVENT = {

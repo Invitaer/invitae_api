@@ -36,6 +36,7 @@ export class OAuthService {
         id: existingUser.id,
         email: existingUser.email,
         name: existingUser.name,
+        role: existingUser.role,
       };
     }
 
@@ -70,6 +71,7 @@ export class OAuthService {
       id: userRecord.id,
       email: userRecord.email,
       name: userRecord.name,
+      role: userRecord.role,
     };
   }
 }

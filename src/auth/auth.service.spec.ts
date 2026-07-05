@@ -15,6 +15,7 @@ import { AuthService } from './auth.service';
 import { DatabaseService } from '../database/database.service';
 import { CryptoService } from '../crypto/crypto.service';
 import { AuthUser } from './interfaces/auth-user.interface';
+import { UserRole } from '../database/schema';
 
 // --- Fixtures ---
 
@@ -36,6 +37,7 @@ const AUTH_USER: AuthUser = {
   id: 'user-uuid-1',
   email: 'test@example.com',
   name: 'Test User',
+  role: UserRole.USER,
 };
 
 describe('AuthService', () => {

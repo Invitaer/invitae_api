@@ -21,6 +21,7 @@ import * as request from 'supertest';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { AuthUser } from './interfaces/auth-user.interface';
+import { UserRole } from '../database/schema';
 
 // --- Fixtures ---
 
@@ -28,6 +29,7 @@ const MOCK_AUTH_USER: AuthUser = {
   id: 'test-user-id',
   email: 'test@test.com',
   name: 'Test User',
+  role: UserRole.USER,
 };
 
 const MOCK_JWT = 'mock.signed.jwt.token';

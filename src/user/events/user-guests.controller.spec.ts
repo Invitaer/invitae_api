@@ -13,8 +13,10 @@ import { AuthGuard } from '@nestjs/passport';
 import * as request from 'supertest';
 import { UserGuestsController } from './user-guests.controller';
 import { GuestsService } from '../../admin/guests/guests.service';
+import { NotificationsService } from '../../notifications/notifications.service';
 import { UserEventMemberGuard } from './guards/user-event-member.guard';
 import { AuthUser } from '../../auth/interfaces/auth-user.interface';
+import { UserRole } from '../../database/schema';
 
 // --- Fixtures ---
 
@@ -22,6 +24,7 @@ const MOCK_USER: AuthUser = {
   id: 'user-uuid-1',
   email: 'user@test.com',
   name: 'User',
+  role: UserRole.USER,
 };
 
 const MOCK_GUEST = {
@@ -62,6 +65,21 @@ const mockGuestsService = {
   remove: jest.fn(),
 };
 
+// --- Mock NotificationsService ---
+
+const MOCK_NOTIFY_RESULT = {
+  status: 'mock',
+  pending: true,
+  notifiedCount: 1,
+  recipients: [{ id: 'guest-uuid-1', name: 'Alice', phone: '123456789' }],
+};
+
+const mockNotificationsService = {
+  notifySelected: jest.fn(),
+  notifyAll: jest.fn(),
+  notifyPending: jest.fn(),
+};
+
 // --- Helper to build app ---
 
 async function buildApp(
@@ -72,6 +90,7 @@ async function buildApp(
     controllers: [UserGuestsController],
     providers: [
       { provide: GuestsService, useValue: mockGuestsService },
+      { provide: NotificationsService, useValue: mockNotificationsService },
     ],
   })
     .overrideGuard(AuthGuard('jwt'))
@@ -169,6 +188,73 @@ describe('UserGuestsController — member access', () => {
       expect(mockGuestsService.remove).toHaveBeenCalledWith(
         'event-uuid-1',
         'guest-uuid-1',
+      );
+    });
+  });
+
+  describe('POST /user/events/:id/guests/notify', () => {
+    it('returns 200 and forwards the selected guest ids', async () => {
+      mockNotificationsService.notifySelected.mockResolvedValueOnce(
+        MOCK_NOTIFY_RESULT,
+      );
+
+      const response = await request(app.getHttpServer())
+        .post('/user/events/event-uuid-1/guests/notify')
+        .send({ guestIds: ['11111111-1111-4111-8111-111111111111'] })
+        .expect(200);
+
+      expect(response.body).toMatchObject({ status: 'mock', pending: true });
+      expect(mockNotificationsService.notifySelected).toHaveBeenCalledWith(
+        'event-uuid-1',
+        ['11111111-1111-4111-8111-111111111111'],
+      );
+    });
+
+    it('returns 400 when guestIds is empty', async () => {
+      await request(app.getHttpServer())
+        .post('/user/events/event-uuid-1/guests/notify')
+        .send({ guestIds: [] })
+        .expect(400);
+    });
+
+    it('returns 400 when guestIds contains a non-uuid', async () => {
+      await request(app.getHttpServer())
+        .post('/user/events/event-uuid-1/guests/notify')
+        .send({ guestIds: ['not-a-uuid'] })
+        .expect(400);
+    });
+  });
+
+  describe('POST /user/events/:id/guests/notify-all', () => {
+    it('returns 200 and notifies all guests of the event', async () => {
+      mockNotificationsService.notifyAll.mockResolvedValueOnce(
+        MOCK_NOTIFY_RESULT,
+      );
+
+      const response = await request(app.getHttpServer())
+        .post('/user/events/event-uuid-1/guests/notify-all')
+        .expect(200);
+
+      expect(response.body).toMatchObject({ status: 'mock', pending: true });
+      expect(mockNotificationsService.notifyAll).toHaveBeenCalledWith(
+        'event-uuid-1',
+      );
+    });
+  });
+
+  describe('POST /user/events/:id/guests/notify-pending', () => {
+    it('returns 200 and notifies only pending guests', async () => {
+      mockNotificationsService.notifyPending.mockResolvedValueOnce(
+        MOCK_NOTIFY_RESULT,
+      );
+
+      const response = await request(app.getHttpServer())
+        .post('/user/events/event-uuid-1/guests/notify-pending')
+        .expect(200);
+
+      expect(response.body).toMatchObject({ status: 'mock', pending: true });
+      expect(mockNotificationsService.notifyPending).toHaveBeenCalledWith(
+        'event-uuid-1',
       );
     });
   });

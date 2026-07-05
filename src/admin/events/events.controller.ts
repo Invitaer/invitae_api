@@ -34,7 +34,7 @@ export class EventsController {
 
   @Get()
   findAll(@CurrentUser() user: AuthUser): Promise<EventWithUsers[]> {
-    return this.eventsService.findAll(user.id);
+    return this.eventsService.findAll(user.id, user.role);
   }
 
   @Get(':id')
@@ -42,7 +42,7 @@ export class EventsController {
     @Param('id') id: string,
     @CurrentUser() user: AuthUser,
   ): Promise<EventWithUsers> {
-    return this.eventsService.findOne(id, user.id);
+    return this.eventsService.findOne(id, user.id, user.role);
   }
 
   @Patch(':id')

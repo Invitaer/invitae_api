@@ -11,6 +11,7 @@ import {
   users,
   Event,
   NewEvent,
+  UserRole,
 } from '../../database/schema';
 import { CreateEventDto } from './dto/create-event.dto';
 import { UpdateEventDto } from './dto/update-event.dto';
@@ -80,7 +81,12 @@ export class EventsService {
     }
   }
 
-  async findAll(userId: string): Promise<EventWithUsers[]> {
+  async findAll(userId: string, role?: UserRole): Promise<EventWithUsers[]> {
+    // ADMIN and SUPER_ADMIN see every event; other roles see only their own.
+    const canSeeAll =
+      role === UserRole.ADMIN || role === UserRole.SUPER_ADMIN;
+    const whereClause = canSeeAll ? undefined : eq(events.userId, userId);
+
     const rows = await this.databaseService.db
       .select({
         event: events,
@@ -89,15 +95,23 @@ export class EventsService {
       .from(events)
       .leftJoin(eventUsers, eq(eventUsers.eventId, events.id))
       .leftJoin(users, eq(users.id, eventUsers.userId))
-      .where(eq(events.userId, userId));
+      .where(whereClause);
 
     return groupRowsByEvent(rows as JoinedEventUserRow[]);
   }
 
-  async findOne(id: string, userId?: string): Promise<EventWithUsers> {
-    const whereClause = userId
-      ? and(eq(events.id, id), eq(events.userId, userId))
-      : eq(events.id, id);
+  async findOne(
+    id: string,
+    userId?: string,
+    role?: UserRole,
+  ): Promise<EventWithUsers> {
+    // ADMIN and SUPER_ADMIN bypass the ownership filter and can open any event.
+    const canSeeAll =
+      role === UserRole.ADMIN || role === UserRole.SUPER_ADMIN;
+    const whereClause =
+      userId && !canSeeAll
+        ? and(eq(events.id, id), eq(events.userId, userId))
+        : eq(events.id, id);
 
     const rows = await this.databaseService.db
       .select({

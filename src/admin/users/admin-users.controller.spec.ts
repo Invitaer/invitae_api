@@ -23,6 +23,7 @@ const MOCK_USER: AuthUser = {
   id: 'user-uuid-1',
   email: 'admin@test.com',
   name: 'Admin',
+  role: UserRole.ADMIN,
 };
 
 const MOCK_ADMIN_USER = {

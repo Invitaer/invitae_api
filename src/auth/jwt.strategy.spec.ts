@@ -11,14 +11,16 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { UnauthorizedException } from '@nestjs/common';
 import { JwtStrategy } from './jwt.strategy';
 import { DatabaseService } from '../database/database.service';
+import { UserRole } from '../database/schema';
 
 // --- Fixtures ---
 
-// The DB query selects only { id, email, name } — the mock returns the projected shape
+// The DB query selects only { id, email, name, role } — the mock returns the projected shape
 const DB_USER_PROJECTED = {
   id: 'user-uuid-1',
   email: 'test@example.com',
   name: 'Test User',
+  role: UserRole.USER,
 };
 
 const VALID_PAYLOAD = {
@@ -67,6 +69,7 @@ describe('JwtStrategy', () => {
         id: DB_USER_PROJECTED.id,
         email: DB_USER_PROJECTED.email,
         name: DB_USER_PROJECTED.name,
+        role: DB_USER_PROJECTED.role,
       });
     });
 

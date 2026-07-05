@@ -16,6 +16,7 @@ import { GuestsController } from './guests.controller';
 import { GuestsService } from './guests.service';
 import { EventOwnerGuard } from '../events/guards/event-owner.guard';
 import { AuthUser } from '../../auth/interfaces/auth-user.interface';
+import { UserRole } from '../../database/schema';
 
 // --- Fixtures ---
 
@@ -23,6 +24,7 @@ const MOCK_USER: AuthUser = {
   id: 'user-uuid-1',
   email: 'owner@test.com',
   name: 'Owner',
+  role: UserRole.USER,
 };
 
 const MOCK_EVENT = {

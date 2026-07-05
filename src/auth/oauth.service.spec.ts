@@ -10,6 +10,7 @@ jest.mock('../database/database.service');
 import { Test, TestingModule } from '@nestjs/testing';
 import { OAuthService } from './oauth.service';
 import { DatabaseService } from '../database/database.service';
+import { UserRole } from '../database/schema';
 
 // --- Fixtures ---
 
@@ -21,6 +22,7 @@ const EXISTING_USER = {
   id: 'user-uuid-1',
   email: 'user@example.com',
   name: 'Test User',
+  role: UserRole.USER,
   password: null as string | null,
   createdAt: new Date(),
 };
@@ -108,6 +110,7 @@ describe('OAuthService', () => {
         id: EXISTING_USER.id,
         email: EXISTING_USER.email,
         name: EXISTING_USER.name,
+        role: EXISTING_USER.role,
       });
       expect(dbServiceMock.db.select).toHaveBeenCalledTimes(2);
       expect(dbServiceMock.db.insert).not.toHaveBeenCalled();
@@ -130,6 +133,7 @@ describe('OAuthService', () => {
         id: newUser.id,
         email: newUser.email,
         name: newUser.name,
+        role: newUser.role,
       });
       expect(dbServiceMock.db.insert).toHaveBeenCalledTimes(2);
     });
@@ -158,6 +162,7 @@ describe('OAuthService', () => {
         id: EXISTING_USER.id,
         email: EXISTING_USER.email,
         name: EXISTING_USER.name,
+        role: EXISTING_USER.role,
       });
       expect(dbServiceMock.db.insert).not.toHaveBeenCalled();
     });
@@ -219,6 +224,7 @@ describe('OAuthService', () => {
         id: existingUserByEmail.id,
         email: existingUserByEmail.email,
         name: existingUserByEmail.name,
+        role: existingUserByEmail.role,
       });
       expect(dbServiceMock.db.insert).toHaveBeenCalledTimes(2);
     });

@@ -11,6 +11,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { FacebookStrategy } from './facebook.strategy';
 import { OAuthService } from '../oauth.service';
 import { AuthUser } from '../interfaces/auth-user.interface';
+import { UserRole } from '../../database/schema';
 
 const mockOAuthService = {
   findOrCreateUser: jest.fn(),
@@ -47,6 +48,7 @@ describe('FacebookStrategy', () => {
       id: 'user-uuid-2',
       email: 'fbuser@example.com',
       name: 'FB User',
+      role: UserRole.USER,
     };
 
     it('should call oauthService.findOrCreateUser with provider facebook and correct args', async () => {

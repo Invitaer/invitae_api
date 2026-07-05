@@ -11,6 +11,7 @@ import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { EventsService } from './events.service';
 import { DatabaseService } from '../../database/database.service';
+import { UserRole } from '../../database/schema';
 
 const mockEvent = {
   id: 'event-uuid-1',
@@ -236,6 +237,56 @@ describe('EventsService', () => {
     });
   });
 
+  describe('findAll — role-based visibility', () => {
+    it('should filter by ownership for a USER role (where clause applied)', async () => {
+      const mockDb = buildMockDb([{ event: mockEvent, assignedUser: null }]);
+      dbServiceMock.db = mockDb;
+
+      await service.findAll('user-uuid-1', UserRole.USER);
+
+      // ownership filter passed to .where() must be defined
+      expect(mockDb._internals.selectWhere).toHaveBeenCalledTimes(1);
+      expect(mockDb._internals.selectWhere.mock.calls[0][0]).toBeDefined();
+    });
+
+    it('should filter by ownership when no role is provided', async () => {
+      const mockDb = buildMockDb([{ event: mockEvent, assignedUser: null }]);
+      dbServiceMock.db = mockDb;
+
+      await service.findAll('user-uuid-1');
+
+      expect(mockDb._internals.selectWhere.mock.calls[0][0]).toBeDefined();
+    });
+
+    it('should NOT filter by ownership for SUPER_ADMIN (sees all events)', async () => {
+      const mockDb = buildMockDb([
+        { event: mockEvent, assignedUser: null },
+        { event: mockEventB, assignedUser: null },
+      ]);
+      dbServiceMock.db = mockDb;
+
+      const result = await service.findAll('any-user', UserRole.SUPER_ADMIN);
+
+      // no ownership filter → where() called with undefined
+      expect(mockDb._internals.selectWhere).toHaveBeenCalledTimes(1);
+      expect(mockDb._internals.selectWhere.mock.calls[0][0]).toBeUndefined();
+      expect(result).toHaveLength(2);
+    });
+
+    it('should NOT filter by ownership for ADMIN (sees all events)', async () => {
+      const mockDb = buildMockDb([
+        { event: mockEvent, assignedUser: null },
+        { event: mockEventB, assignedUser: null },
+      ]);
+      dbServiceMock.db = mockDb;
+
+      const result = await service.findAll('any-user', UserRole.ADMIN);
+
+      expect(mockDb._internals.selectWhere.mock.calls[0][0]).toBeUndefined();
+      expect(result).toHaveLength(2);
+    });
+  });
+
   describe('findOne', () => {
     it('should return the event with users when found', async () => {
       dbServiceMock.db = buildMockDb([
@@ -302,6 +353,44 @@ describe('EventsService', () => {
 
       expect(result).toEqual({ ...mockEvent, users: [] });
       expect(result.id).toBe('event-uuid-1');
+    });
+
+    it('should return an event owned by another user when caller is SUPER_ADMIN', async () => {
+      // mockEvent.userId is 'user-uuid-1'; caller id differs but role bypasses ownership
+      dbServiceMock.db = buildMockDb([
+        { event: mockEvent, assignedUser: mockAlice },
+      ]);
+
+      const result = await service.findOne(
+        'event-uuid-1',
+        'a-different-admin-id',
+        UserRole.SUPER_ADMIN,
+      );
+
+      expect(result).toEqual({ ...mockEvent, users: [mockAlice] });
+    });
+
+    it('should return an event owned by another user when caller is ADMIN', async () => {
+      dbServiceMock.db = buildMockDb([
+        { event: mockEvent, assignedUser: mockAlice },
+      ]);
+
+      const result = await service.findOne(
+        'event-uuid-1',
+        'a-different-admin-id',
+        UserRole.ADMIN,
+      );
+
+      expect(result).toEqual({ ...mockEvent, users: [mockAlice] });
+    });
+
+    it('should still enforce ownership for a USER role opening another user event', async () => {
+      // DB returns empty because (id AND userId) does not match → NotFound
+      dbServiceMock.db = buildMockDb([]);
+
+      await expect(
+        service.findOne('event-uuid-1', 'different-user-id', UserRole.USER),
+      ).rejects.toThrow(NotFoundException);
     });
   });
 
