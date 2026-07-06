@@ -92,7 +92,7 @@ describe('NotificationsService', () => {
   });
 
   describe('notifyAll', () => {
-    it('returns every guest of the event as a mock/pending result', async () => {
+    it('returns every guest of the event as a mock/pending result (no search)', async () => {
       dbServiceMock.db = buildMockDb([mockGuestA, mockGuestB]);
 
       const result = await service.notifyAll('event-uuid-1');
@@ -102,10 +102,35 @@ describe('NotificationsService', () => {
       expect(result.pending).toBe(true);
       expect(dbServiceMock.db.select).toHaveBeenCalledTimes(1);
     });
+
+    it('applies the search filter when provided, notifying only matching guests', async () => {
+      dbServiceMock.db = buildMockDb([mockGuestA]);
+
+      const result = await service.notifyAll('event-uuid-1', 'alice');
+
+      expect(result.notifiedCount).toBe(1);
+      expect(result.recipients).toEqual([
+        { id: 'guest-uuid-1', name: 'Alice', phone: '111' },
+      ]);
+    });
+
+    it('produces a DIFFERENT where condition with search vs without (proves the filter is really applied, not dropped)', async () => {
+      dbServiceMock.db = buildMockDb([mockGuestA]);
+      await service.notifyAll('event-uuid-1');
+      const conditionWithoutSearch =
+        dbServiceMock.db._internals.where.mock.calls[0][0];
+
+      dbServiceMock.db = buildMockDb([mockGuestA]);
+      await service.notifyAll('event-uuid-1', 'alice');
+      const conditionWithSearch =
+        dbServiceMock.db._internals.where.mock.calls[0][0];
+
+      expect(conditionWithSearch).not.toEqual(conditionWithoutSearch);
+    });
   });
 
   describe('notifyPending', () => {
-    it('returns a mock/pending result scoped to pending guests', async () => {
+    it('returns a mock/pending result scoped to pending guests (no search)', async () => {
       dbServiceMock.db = buildMockDb([mockGuestA]);
 
       const result = await service.notifyPending('event-uuid-1');
@@ -116,6 +141,29 @@ describe('NotificationsService', () => {
         notifiedCount: 1,
       });
       expect(dbServiceMock.db._internals.where).toHaveBeenCalledTimes(1);
+    });
+
+    it('combines the search filter with the PENDING restriction', async () => {
+      dbServiceMock.db = buildMockDb([mockGuestA]);
+
+      const result = await service.notifyPending('event-uuid-1', 'alice');
+
+      expect(result.notifiedCount).toBe(1);
+      expect(result.recipients).toEqual([
+        { id: 'guest-uuid-1', name: 'Alice', phone: '111' },
+      ]);
+    });
+
+    it('produces a DIFFERENT where condition for notifyPending with search vs without (proves the filter is really applied)', async () => {
+      dbServiceMock.db = buildMockDb([mockGuestA]);
+      await service.notifyPending('event-uuid-1');
+      const conditionWithoutSearch = dbServiceMock.db._internals.where.mock.calls[0][0];
+
+      dbServiceMock.db = buildMockDb([mockGuestA]);
+      await service.notifyPending('event-uuid-1', 'alice');
+      const conditionWithSearch = dbServiceMock.db._internals.where.mock.calls[0][0];
+
+      expect(conditionWithSearch).not.toEqual(conditionWithoutSearch);
     });
   });
 });

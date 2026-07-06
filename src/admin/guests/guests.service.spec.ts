@@ -338,4 +338,180 @@ describe('GuestsService (eventId scoping)', () => {
       expect(result.additionalPhones).toEqual(['555']);
     });
   });
+
+  describe('findAllPaginated', () => {
+    // Chain: 1st select -> data (from.where.limit.offset), 2nd select -> count
+    // (from.where), 3rd select -> phone hydration for the returned slice only
+    // (from.where).
+    function buildPaginatedMockDb(
+      dataRows: unknown[],
+      countValue: number,
+      phoneRows: unknown[] = [],
+    ) {
+      const offset = jest.fn().mockResolvedValue(dataRows);
+      const limit = jest.fn().mockReturnValue({ offset });
+      const dataWhere = jest.fn().mockReturnValue({ limit });
+      const dataFrom = jest.fn().mockReturnValue({ where: dataWhere });
+
+      const countWhere = jest.fn().mockResolvedValue([{ count: countValue }]);
+      const countFrom = jest.fn().mockReturnValue({ where: countWhere });
+
+      const phoneWhere = jest.fn().mockResolvedValue(phoneRows);
+      const phoneFrom = jest.fn().mockReturnValue({ where: phoneWhere });
+
+      let call = 0;
+      const select = jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) return { from: dataFrom };
+        if (call === 2) return { from: countFrom };
+        return { from: phoneFrom };
+      });
+
+      return {
+        select,
+        _internals: {
+          offset,
+          limit,
+          dataWhere,
+          dataFrom,
+          countWhere,
+          countFrom,
+          phoneWhere,
+          phoneFrom,
+        },
+      };
+    }
+
+    it('returns { data, total } with default page=1/limit=10', async () => {
+      dbServiceMock.db = buildPaginatedMockDb(
+        [MOCK_GUEST_E1],
+        1,
+      ) as unknown as ReturnType<typeof buildMockDb>;
+
+      const result = await service.findAllPaginated('event-uuid-1', {
+        page: 1,
+        limit: 10,
+      });
+
+      expect(result.total).toBe(1);
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0]).toEqual(
+        expect.objectContaining({ id: 'guest-uuid-1', additionalPhones: [] }),
+      );
+    });
+
+    it('computes offset from page/limit (page=3, limit=5 -> offset=10)', async () => {
+      const mockDb = buildPaginatedMockDb([MOCK_GUEST_E1], 1);
+      dbServiceMock.db = mockDb as unknown as ReturnType<typeof buildMockDb>;
+
+      await service.findAllPaginated('event-uuid-1', { page: 3, limit: 5 });
+
+      expect(mockDb._internals.limit).toHaveBeenCalledWith(5);
+      expect(mockDb._internals.offset).toHaveBeenCalledWith(10);
+    });
+
+    it('returns data=[] and total=0 when no guests match, without querying phones', async () => {
+      const mockDb = buildPaginatedMockDb([], 0);
+      dbServiceMock.db = mockDb as unknown as ReturnType<typeof buildMockDb>;
+
+      const result = await service.findAllPaginated('event-uuid-1', {
+        page: 1,
+        limit: 10,
+      });
+
+      expect(result).toEqual({ data: [], total: 0 });
+      expect(mockDb.select).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns data=[] but the REAL total when the page is past the end (offset overflow)', async () => {
+      // page far beyond the data, but 45 guests genuinely match the filter
+      const mockDb = buildPaginatedMockDb([], 45);
+      dbServiceMock.db = mockDb as unknown as ReturnType<typeof buildMockDb>;
+
+      const result = await service.findAllPaginated('event-uuid-1', {
+        page: 99,
+        limit: 10,
+      });
+
+      expect(result).toEqual({ data: [], total: 45 });
+      // count query is independent of the (empty) data slice
+      expect(mockDb._internals.offset).toHaveBeenCalledWith(980);
+      expect(mockDb.select).toHaveBeenCalledTimes(2); // no phone hydration
+    });
+
+    it('hydrates additionalPhones only for the returned page slice', async () => {
+      const mockDb = buildPaginatedMockDb(
+        [MOCK_GUEST_E1],
+        1,
+        [{ id: 'phone-1', guestId: 'guest-uuid-1', phone: '999' }],
+      );
+      dbServiceMock.db = mockDb as unknown as ReturnType<typeof buildMockDb>;
+
+      const result = await service.findAllPaginated('event-uuid-1', {
+        page: 1,
+        limit: 10,
+      });
+
+      expect(result.data[0].additionalPhones).toEqual(['999']);
+    });
+
+    it('applies the SAME filter to both the data query and the count query (search consistency)', async () => {
+      const mockDb = buildPaginatedMockDb([MOCK_GUEST_E1], 1);
+      dbServiceMock.db = mockDb as unknown as ReturnType<typeof buildMockDb>;
+
+      await service.findAllPaginated('event-uuid-1', {
+        page: 1,
+        limit: 10,
+        search: 'alice',
+      });
+
+      const filterUsedForData = mockDb._internals.dataFrom.mock.calls[0]
+        ? mockDb._internals.dataWhere.mock.calls[0][0]
+        : undefined;
+      const filterUsedForCount = mockDb._internals.countWhere.mock.calls[0][0];
+
+      expect(filterUsedForData).toEqual(filterUsedForCount);
+    });
+  });
+
+  describe('findMatchingIds', () => {
+    function buildIdsMockDb(idRows: { id: string }[]) {
+      const where = jest.fn().mockResolvedValue(idRows);
+      const from = jest.fn().mockReturnValue({ where });
+      return {
+        select: jest.fn().mockReturnValue({ from }),
+        _internals: { where, from },
+      };
+    }
+
+    it('returns unpaginated ids matching the filter', async () => {
+      const mockDb = buildIdsMockDb([
+        { id: 'guest-uuid-1' },
+        { id: 'guest-uuid-2' },
+      ]);
+      dbServiceMock.db = mockDb as unknown as ReturnType<typeof buildMockDb>;
+
+      const result = await service.findMatchingIds('event-uuid-1', 'alice');
+
+      expect(result).toEqual(['guest-uuid-1', 'guest-uuid-2']);
+    });
+
+    it('returns all ids of the event when no search is provided', async () => {
+      const mockDb = buildIdsMockDb([{ id: 'guest-uuid-1' }]);
+      dbServiceMock.db = mockDb as unknown as ReturnType<typeof buildMockDb>;
+
+      const result = await service.findMatchingIds('event-uuid-1');
+
+      expect(result).toEqual(['guest-uuid-1']);
+    });
+
+    it('returns an empty array when no guest matches the filter', async () => {
+      const mockDb = buildIdsMockDb([]);
+      dbServiceMock.db = mockDb as unknown as ReturnType<typeof buildMockDb>;
+
+      const result = await service.findMatchingIds('event-uuid-1', 'zzz');
+
+      expect(result).toEqual([]);
+    });
+  });
 });

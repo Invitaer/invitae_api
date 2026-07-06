@@ -60,6 +60,8 @@ class RejectJwtGuard {
 
 const mockGuestsService = {
   findAll: jest.fn(),
+  findAllPaginated: jest.fn(),
+  findMatchingIds: jest.fn(),
   create: jest.fn(),
   update: jest.fn(),
   remove: jest.fn(),
@@ -120,16 +122,82 @@ describe('UserGuestsController — member access', () => {
   });
 
   describe('GET /user/events/:id/guests', () => {
-    it('returns 200 with guest array (each guest has rsvpStatus)', async () => {
-      mockGuestsService.findAll.mockResolvedValueOnce([MOCK_GUEST]);
+    it('returns 200 with { data, total } (each guest has rsvpStatus)', async () => {
+      mockGuestsService.findAllPaginated.mockResolvedValueOnce({
+        data: [MOCK_GUEST],
+        total: 1,
+      });
 
       const response = await request(app.getHttpServer())
         .get('/user/events/event-uuid-1/guests')
         .expect(200);
 
-      expect(response.body).toHaveLength(1);
-      expect(response.body[0]).toMatchObject({ rsvpStatus: 'PENDING' });
-      expect(mockGuestsService.findAll).toHaveBeenCalledWith('event-uuid-1');
+      expect(response.body).toEqual({ data: [MOCK_GUEST], total: 1 });
+      expect(response.body.data[0]).toMatchObject({ rsvpStatus: 'PENDING' });
+      expect(mockGuestsService.findAllPaginated).toHaveBeenCalledWith(
+        'event-uuid-1',
+        expect.objectContaining({ page: 1, limit: 10 }),
+      );
+    });
+
+    it('forwards search/page/limit query params to findAllPaginated', async () => {
+      mockGuestsService.findAllPaginated.mockResolvedValueOnce({
+        data: [],
+        total: 0,
+      });
+
+      await request(app.getHttpServer())
+        .get('/user/events/event-uuid-1/guests')
+        .query({ search: 'alice', page: 2, limit: 25 })
+        .expect(200);
+
+      expect(mockGuestsService.findAllPaginated).toHaveBeenCalledWith(
+        'event-uuid-1',
+        expect.objectContaining({ search: 'alice', page: 2, limit: 25 }),
+      );
+    });
+
+    it('returns 400 when limit exceeds the max', async () => {
+      await request(app.getHttpServer())
+        .get('/user/events/event-uuid-1/guests')
+        .query({ limit: 1000 })
+        .expect(400);
+    });
+  });
+
+  describe('GET /user/events/:id/guests/ids', () => {
+    it('returns 200 with an array of ids matching the search filter', async () => {
+      mockGuestsService.findMatchingIds.mockResolvedValueOnce([
+        'guest-uuid-1',
+        'guest-uuid-2',
+      ]);
+
+      const response = await request(app.getHttpServer())
+        .get('/user/events/event-uuid-1/guests/ids')
+        .query({ search: 'alice' })
+        .expect(200);
+
+      expect(response.body).toEqual(['guest-uuid-1', 'guest-uuid-2']);
+      expect(mockGuestsService.findMatchingIds).toHaveBeenCalledWith(
+        'event-uuid-1',
+        'alice',
+      );
+    });
+
+    it('returns all ids of the event when no search is given', async () => {
+      mockGuestsService.findMatchingIds.mockResolvedValueOnce([
+        'guest-uuid-1',
+      ]);
+
+      const response = await request(app.getHttpServer())
+        .get('/user/events/event-uuid-1/guests/ids')
+        .expect(200);
+
+      expect(response.body).toEqual(['guest-uuid-1']);
+      expect(mockGuestsService.findMatchingIds).toHaveBeenCalledWith(
+        'event-uuid-1',
+        undefined,
+      );
     });
   });
 
@@ -226,7 +294,7 @@ describe('UserGuestsController — member access', () => {
   });
 
   describe('POST /user/events/:id/guests/notify-all', () => {
-    it('returns 200 and notifies all guests of the event', async () => {
+    it('returns 200 and notifies all guests of the event (empty body = everyone)', async () => {
       mockNotificationsService.notifyAll.mockResolvedValueOnce(
         MOCK_NOTIFY_RESULT,
       );
@@ -238,12 +306,29 @@ describe('UserGuestsController — member access', () => {
       expect(response.body).toMatchObject({ status: 'mock', pending: true });
       expect(mockNotificationsService.notifyAll).toHaveBeenCalledWith(
         'event-uuid-1',
+        undefined,
+      );
+    });
+
+    it('forwards search from the body to notifyAll', async () => {
+      mockNotificationsService.notifyAll.mockResolvedValueOnce(
+        MOCK_NOTIFY_RESULT,
+      );
+
+      await request(app.getHttpServer())
+        .post('/user/events/event-uuid-1/guests/notify-all')
+        .send({ search: 'john' })
+        .expect(200);
+
+      expect(mockNotificationsService.notifyAll).toHaveBeenCalledWith(
+        'event-uuid-1',
+        'john',
       );
     });
   });
 
   describe('POST /user/events/:id/guests/notify-pending', () => {
-    it('returns 200 and notifies only pending guests', async () => {
+    it('returns 200 and notifies only pending guests (empty body = all pending)', async () => {
       mockNotificationsService.notifyPending.mockResolvedValueOnce(
         MOCK_NOTIFY_RESULT,
       );
@@ -255,6 +340,23 @@ describe('UserGuestsController — member access', () => {
       expect(response.body).toMatchObject({ status: 'mock', pending: true });
       expect(mockNotificationsService.notifyPending).toHaveBeenCalledWith(
         'event-uuid-1',
+        undefined,
+      );
+    });
+
+    it('forwards search from the body to notifyPending', async () => {
+      mockNotificationsService.notifyPending.mockResolvedValueOnce(
+        MOCK_NOTIFY_RESULT,
+      );
+
+      await request(app.getHttpServer())
+        .post('/user/events/event-uuid-1/guests/notify-pending')
+        .send({ search: 'john' })
+        .expect(200);
+
+      expect(mockNotificationsService.notifyPending).toHaveBeenCalledWith(
+        'event-uuid-1',
+        'john',
       );
     });
   });

@@ -1,9 +1,11 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { DatabaseService } from '../../database/database.service';
 import { guests, Guest, NewGuest, guestPhones } from '../../database/schema';
 import { CreateGuestDto } from './dto/create-guest.dto';
+import { FindGuestsQueryDto } from './dto/find-guests-query.dto';
 import { UpdateGuestDto } from './dto/update-guest.dto';
+import { buildGuestFilter } from './guest-filter';
 
 export type GuestWithPhones = Guest & { additionalPhones: string[] };
 
@@ -40,6 +42,73 @@ export class GuestsService {
       ...g,
       additionalPhones: phonesByGuestId[g.id] ?? [],
     }));
+  }
+
+  /**
+   * Paginated + search-filtered listing for the user-facing guests endpoint.
+   * NOTE: `findAll` above is untouched and stays reserved for the admin path.
+   */
+  async findAllPaginated(
+    eventId: string,
+    query: FindGuestsQueryDto,
+  ): Promise<{ data: GuestWithPhones[]; total: number }> {
+    const { search, page = 1, limit = 10 } = query;
+    const offset = (page - 1) * limit;
+    const filter = buildGuestFilter(eventId, search);
+    const db = this.databaseService.db;
+
+    const guestList: Guest[] = await db
+      .select()
+      .from(guests)
+      .where(filter)
+      .limit(limit)
+      .offset(offset);
+
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(guests)
+      .where(filter);
+
+    if (guestList.length === 0) {
+      return { data: [], total: count };
+    }
+
+    const guestIds = guestList.map((g) => g.id);
+    const phoneRows = await db
+      .select()
+      .from(guestPhones)
+      .where(inArray(guestPhones.guestId, guestIds));
+
+    const phonesByGuestId = phoneRows.reduce<Record<string, string[]>>(
+      (acc, row) => {
+        if (!acc[row.guestId]) acc[row.guestId] = [];
+        acc[row.guestId].push(row.phone);
+        return acc;
+      },
+      {},
+    );
+
+    const data: GuestWithPhones[] = guestList.map((g) => ({
+      ...g,
+      additionalPhones: phonesByGuestId[g.id] ?? [],
+    }));
+
+    return { data, total: count };
+  }
+
+  /**
+   * All guest ids matching the filter, unpaginated. Reuses the SAME filter
+   * builder as `findAllPaginated` so filter-aware select-all never drifts
+   * from what pagination shows.
+   */
+  async findMatchingIds(eventId: string, search?: string): Promise<string[]> {
+    const filter = buildGuestFilter(eventId, search);
+    const rows = await this.databaseService.db
+      .select({ id: guests.id })
+      .from(guests)
+      .where(filter);
+
+    return rows.map((r) => r.id);
   }
 
   async findOne(eventId: string, id: string): Promise<GuestWithPhones> {

@@ -8,17 +8,20 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { Auth } from '../../auth/decorators/authenticated.decorator';
-import { GuestsService } from '../../admin/guests/guests.service';
+import { GuestsService, GuestWithPhones } from '../../admin/guests/guests.service';
 import { CreateGuestDto } from '../../admin/guests/dto/create-guest.dto';
+import { FindGuestsQueryDto } from '../../admin/guests/dto/find-guests-query.dto';
 import { UpdateGuestDto } from '../../admin/guests/dto/update-guest.dto';
 import {
   NotificationResult,
   NotificationsService,
 } from '../../notifications/notifications.service';
 import { Guest } from '../../database/schema';
+import { NotifyFilterDto } from './dto/notify-filter.dto';
 import { NotifyGuestsDto } from './dto/notify-guests.dto';
 import { UserEventMemberGuard } from './guards/user-event-member.guard';
 
@@ -32,8 +35,20 @@ export class UserGuestsController {
 
   @Get()
   @UseGuards(UserEventMemberGuard)
-  findAll(@Param('id') eventId: string): Promise<Guest[]> {
-    return this.guestsService.findAll(eventId);
+  findAll(
+    @Param('id') eventId: string,
+    @Query() query: FindGuestsQueryDto,
+  ): Promise<{ data: GuestWithPhones[]; total: number }> {
+    return this.guestsService.findAllPaginated(eventId, query);
+  }
+
+  @Get('ids')
+  @UseGuards(UserEventMemberGuard)
+  findMatchingIds(
+    @Param('id') eventId: string,
+    @Query('search') search?: string,
+  ): Promise<string[]> {
+    return this.guestsService.findMatchingIds(eventId, search);
   }
 
   @Post()
@@ -60,15 +75,21 @@ export class UserGuestsController {
   @Post('notify-all')
   @HttpCode(HttpStatus.OK)
   @UseGuards(UserEventMemberGuard)
-  notifyAll(@Param('id') eventId: string): Promise<NotificationResult> {
-    return this.notificationsService.notifyAll(eventId);
+  notifyAll(
+    @Param('id') eventId: string,
+    @Body() dto: NotifyFilterDto,
+  ): Promise<NotificationResult> {
+    return this.notificationsService.notifyAll(eventId, dto.search);
   }
 
   @Post('notify-pending')
   @HttpCode(HttpStatus.OK)
   @UseGuards(UserEventMemberGuard)
-  notifyPending(@Param('id') eventId: string): Promise<NotificationResult> {
-    return this.notificationsService.notifyPending(eventId);
+  notifyPending(
+    @Param('id') eventId: string,
+    @Body() dto: NotifyFilterDto,
+  ): Promise<NotificationResult> {
+    return this.notificationsService.notifyPending(eventId, dto.search);
   }
 
   @Patch(':guestId')

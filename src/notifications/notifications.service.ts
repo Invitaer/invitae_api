@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { and, eq, inArray } from 'drizzle-orm';
 import { DatabaseService } from '../database/database.service';
 import { guests, Guest, RsvpStatus } from '../database/schema';
+import { buildGuestFilter } from '../admin/guests/guest-filter';
 
 /**
  * Result of a notification dispatch.
@@ -43,24 +44,36 @@ export class NotificationsService {
     return this.dispatch(recipients);
   }
 
-  /** Notify every guest of the event, regardless of RSVP status. */
-  async notifyAll(eventId: string): Promise<NotificationResult> {
+  /**
+   * Notify every guest of the event, regardless of RSVP status. When
+   * `search` is provided, only guests matching it (via the SAME filter used
+   * by `GuestsService.findAllPaginated`/`findMatchingIds`) are notified. An
+   * omitted `search` preserves the original "notify everyone" behavior.
+   */
+  async notifyAll(eventId: string, search?: string): Promise<NotificationResult> {
     const recipients = await this.databaseService.db
       .select()
       .from(guests)
-      .where(eq(guests.eventId, eventId));
+      .where(buildGuestFilter(eventId, search));
 
     return this.dispatch(recipients);
   }
 
-  /** Notify only guests whose RSVP status is still PENDING. */
-  async notifyPending(eventId: string): Promise<NotificationResult> {
+  /**
+   * Notify only guests whose RSVP status is still PENDING. Always applies
+   * the PENDING restriction; `search` (via the SAME shared filter builder)
+   * additionally narrows the recipients.
+   */
+  async notifyPending(
+    eventId: string,
+    search?: string,
+  ): Promise<NotificationResult> {
     const recipients = await this.databaseService.db
       .select()
       .from(guests)
       .where(
         and(
-          eq(guests.eventId, eventId),
+          buildGuestFilter(eventId, search),
           eq(guests.rsvpStatus, RsvpStatus.PENDING),
         ),
       );
