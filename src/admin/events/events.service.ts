@@ -62,12 +62,14 @@ export class EventsService {
         } as NewEvent)
         .returning();
 
-      if (dto.userIds?.length) {
-        await this.databaseService.db
-          .insert(eventUsers)
-          .values(dto.userIds.map((uid) => ({ eventId: event.id, userId: uid })))
-          .returning();
-      }
+      // The owner must always be a member: the user dashboard scopes events by
+      // event_users membership, so an owner without a membership row would never
+      // see their own event. Merge the owner with any explicitly assigned users.
+      const memberIds = [...new Set([userId, ...(dto.userIds ?? [])])];
+      await this.databaseService.db
+        .insert(eventUsers)
+        .values(memberIds.map((uid) => ({ eventId: event.id, userId: uid })))
+        .returning();
 
       return event;
     } catch (error: any) {
@@ -154,12 +156,13 @@ export class EventsService {
         .delete(eventUsers)
         .where(eq(eventUsers.eventId, id));
 
-      if (dto.userIds.length) {
-        await this.databaseService.db
-          .insert(eventUsers)
-          .values(dto.userIds.map((uid) => ({ eventId: id, userId: uid })))
-          .returning();
-      }
+      // Always keep the owner as a member so editing the assigned-users list can
+      // never wipe the owner's own access to the event.
+      const memberIds = [...new Set([userId, ...dto.userIds])];
+      await this.databaseService.db
+        .insert(eventUsers)
+        .values(memberIds.map((uid) => ({ eventId: id, userId: uid })))
+        .returning();
     }
 
     return event;

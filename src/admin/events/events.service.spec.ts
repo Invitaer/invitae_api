@@ -435,8 +435,8 @@ describe('EventsService', () => {
     });
   });
 
-  describe('create — userIds sync', () => {
-    it('should bulk-insert event_users rows when userIds is provided and non-empty', async () => {
+  describe('create — membership sync', () => {
+    it('should insert the owner plus assigned users when userIds is provided', async () => {
       const mockDb = buildMockDbForUserIds([mockEvent]);
       dbServiceMock.db = mockDb as any;
 
@@ -451,14 +451,33 @@ describe('EventsService', () => {
       // insert was called twice: once for events, once for event_users
       expect(mockDb._internals.insertMock).toHaveBeenCalledTimes(2);
 
-      // second insert received the mapped event_users rows
+      // membership always includes the owner first, then the assigned users
       const eventUsersPayload = mockDb._internals.eventUsersValues.mock.calls[0][0] as Array<{ eventId: string; userId: string }>;
-      expect(eventUsersPayload).toHaveLength(2);
-      expect(eventUsersPayload[0]).toMatchObject({ eventId: mockEvent.id, userId: 'uid-1' });
-      expect(eventUsersPayload[1]).toMatchObject({ eventId: mockEvent.id, userId: 'uid-2' });
+      expect(eventUsersPayload).toHaveLength(3);
+      expect(eventUsersPayload[0]).toMatchObject({ eventId: mockEvent.id, userId: 'user-uuid-1' });
+      expect(eventUsersPayload[1]).toMatchObject({ eventId: mockEvent.id, userId: 'uid-1' });
+      expect(eventUsersPayload[2]).toMatchObject({ eventId: mockEvent.id, userId: 'uid-2' });
     });
 
-    it('should NOT insert event_users rows when userIds is absent', async () => {
+    it('should not duplicate the owner when userIds already contains them', async () => {
+      const mockDb = buildMockDbForUserIds([mockEvent]);
+      dbServiceMock.db = mockDb as any;
+
+      await service.create('user-uuid-1', {
+        name: 'My Wedding',
+        slug: 'my-wedding-2025',
+        date: '2025-10-10',
+        eventType: 'wedding',
+        userIds: ['user-uuid-1', 'uid-2'],
+      });
+
+      const eventUsersPayload = mockDb._internals.eventUsersValues.mock.calls[0][0] as Array<{ eventId: string; userId: string }>;
+      const ownerRows = eventUsersPayload.filter((r) => r.userId === 'user-uuid-1');
+      expect(ownerRows).toHaveLength(1);
+      expect(eventUsersPayload).toHaveLength(2);
+    });
+
+    it('should insert the owner as a member when userIds is absent (fixes empty user-dashboard list)', async () => {
       const mockDb = buildMockDbForUserIds([mockEvent]);
       dbServiceMock.db = mockDb as any;
 
@@ -469,11 +488,15 @@ describe('EventsService', () => {
         eventType: 'wedding',
       });
 
-      // insert called only once (for events); no event_users insert
-      expect(mockDb._internals.insertMock).toHaveBeenCalledTimes(1);
+      // event_users insert still happens so the owner can see their own event
+      expect(mockDb._internals.insertMock).toHaveBeenCalledTimes(2);
+      const eventUsersPayload = mockDb._internals.eventUsersValues.mock.calls[0][0] as Array<{ eventId: string; userId: string }>;
+      expect(eventUsersPayload).toEqual([
+        { eventId: mockEvent.id, userId: 'user-uuid-1' },
+      ]);
     });
 
-    it('should NOT insert event_users rows when userIds is an empty array', async () => {
+    it('should insert the owner as a member when userIds is an empty array', async () => {
       const mockDb = buildMockDbForUserIds([mockEvent]);
       dbServiceMock.db = mockDb as any;
 
@@ -485,12 +508,16 @@ describe('EventsService', () => {
         userIds: [],
       });
 
-      expect(mockDb._internals.insertMock).toHaveBeenCalledTimes(1);
+      expect(mockDb._internals.insertMock).toHaveBeenCalledTimes(2);
+      const eventUsersPayload = mockDb._internals.eventUsersValues.mock.calls[0][0] as Array<{ eventId: string; userId: string }>;
+      expect(eventUsersPayload).toEqual([
+        { eventId: mockEvent.id, userId: 'user-uuid-1' },
+      ]);
     });
   });
 
-  describe('update — userIds replace-set', () => {
-    it('should delete-then-insert event_users when userIds is provided', async () => {
+  describe('update — membership replace-set', () => {
+    it('should delete-then-insert event_users (owner + assigned) when userIds is provided', async () => {
       const updatedEvent = { ...mockEvent, name: 'Updated' };
 
       // For update scenario: db.update() returns event, db.delete() clears, db.insert() re-inserts
@@ -523,13 +550,19 @@ describe('EventsService', () => {
       expect(mockDb.delete).toHaveBeenCalledTimes(1);
       // insert called once for event_users re-insertion
       expect(insertMock).toHaveBeenCalledTimes(1);
+      // owner is always re-added so an edit never wipes their own membership
       const insertPayload = eventUsersValues.mock.calls[0][0] as Array<{ eventId: string; userId: string }>;
-      expect(insertPayload).toHaveLength(1);
-      expect(insertPayload[0]).toMatchObject({ eventId: 'event-uuid-1', userId: 'uid-new' });
+      expect(insertPayload).toHaveLength(2);
+      expect(insertPayload[0]).toMatchObject({ eventId: 'event-uuid-1', userId: 'user-uuid-1' });
+      expect(insertPayload[1]).toMatchObject({ eventId: 'event-uuid-1', userId: 'uid-new' });
     });
 
-    it('should delete all event_users but NOT re-insert when userIds is empty array', async () => {
+    it('should re-insert only the owner when userIds is an empty array (never wipes owner)', async () => {
       const updatedEvent = { ...mockEvent };
+
+      const eventUsersReturning = jest.fn().mockResolvedValue([]);
+      const eventUsersValues = jest.fn().mockReturnValue({ returning: eventUsersReturning });
+      const insertMock = jest.fn().mockReturnValue({ values: eventUsersValues });
 
       const deleteReturning = jest.fn().mockResolvedValue([]);
       const deleteWhere = jest.fn().mockReturnValue({ returning: deleteReturning });
@@ -538,7 +571,6 @@ describe('EventsService', () => {
       const updateMutWhere = jest.fn().mockReturnValue({ returning: updateReturning });
       const updateSet = jest.fn().mockReturnValue({ where: updateMutWhere });
 
-      const insertMock = jest.fn();
       const mockDb = {
         insert: insertMock,
         update: jest.fn().mockReturnValue({ set: updateSet }),
@@ -554,8 +586,12 @@ describe('EventsService', () => {
 
       // delete called once
       expect(mockDb.delete).toHaveBeenCalledTimes(1);
-      // insert NOT called (no users to re-insert)
-      expect(insertMock).toHaveBeenCalledTimes(0);
+      // insert IS called to restore the owner's membership
+      expect(insertMock).toHaveBeenCalledTimes(1);
+      const insertPayload = eventUsersValues.mock.calls[0][0] as Array<{ eventId: string; userId: string }>;
+      expect(insertPayload).toEqual([
+        { eventId: 'event-uuid-1', userId: 'user-uuid-1' },
+      ]);
     });
 
     it('should NOT touch event_users when userIds is undefined', async () => {
