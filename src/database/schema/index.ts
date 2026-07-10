@@ -5,3 +5,4 @@ export * from './guest-phones.schema';
 export * from './users.schema';
 export * from './oauth-accounts.schema';
 export * from './event-users.schema';
+export * from './whatsapp-links.schema';
