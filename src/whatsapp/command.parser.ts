@@ -21,6 +21,9 @@ const SELECT_EVENT_PATTERN = /^select_event:(.+)$/;
 const FILTER_BUTTON_PATTERN = /^filter:(confirmados|pendientes|rechazados)$/;
 const SEARCH_TEXT_PATTERN = /^(?:buscar|status)\s+(.+)$/i;
 const FILTER_TEXT_PATTERN = /^filtrar\s+(confirmados|pendientes|rechazados)$/i;
+const EDIT_GUEST_PATTERN = /^edit_guest:(.+)$/;
+const RSVP_CONFIRM_PATTERN = /^confirmar:(.+)$/;
+const RSVP_DECLINE_PATTERN = /^rechazar:(.+)$/;
 
 /**
  * Pure parser: (text | interactiveId) -> BotIntent. No I/O, no service
@@ -58,6 +61,10 @@ function parseInteractiveId(interactiveId: string): BotIntent | undefined {
       return { kind: 'RSVP_SUMMARY' };
     case 'cancel':
       return { kind: 'CANCEL' };
+    case 'add_guest':
+      return { kind: 'START_ADD_GUEST' };
+    case 'confirm':
+      return { kind: 'CONFIRM_ACTION' };
   }
 
   const selectMatch = interactiveId.match(SELECT_EVENT_PATTERN);
@@ -68,6 +75,24 @@ function parseInteractiveId(interactiveId: string): BotIntent | undefined {
   const filterMatch = interactiveId.match(FILTER_BUTTON_PATTERN);
   if (filterMatch) {
     return { kind: 'FILTER_BY_STATUS', status: FILTER_STATUS_MAP[filterMatch[1]] };
+  }
+
+  const editGuestMatch = interactiveId.match(EDIT_GUEST_PATTERN);
+  if (editGuestMatch) {
+    return { kind: 'START_EDIT_GUEST', guestId: editGuestMatch[1] };
+  }
+
+  // "confirmar:{id}"/"rechazar:{id}" (RSVP status change) are distinct ids
+  // from the flow-gate "confirm" handled above — no ambiguity between the
+  // two button namespaces.
+  const rsvpConfirmMatch = interactiveId.match(RSVP_CONFIRM_PATTERN);
+  if (rsvpConfirmMatch) {
+    return { kind: 'RSVP_CONFIRM', guestId: rsvpConfirmMatch[1] };
+  }
+
+  const rsvpDeclineMatch = interactiveId.match(RSVP_DECLINE_PATTERN);
+  if (rsvpDeclineMatch) {
+    return { kind: 'RSVP_DECLINE', guestId: rsvpDeclineMatch[1] };
   }
 
   return undefined;
@@ -90,6 +115,9 @@ function parseText(text: string): BotIntent {
   }
   if (lower === 'cancelar') {
     return { kind: 'CANCEL' };
+  }
+  if (lower === 'agregar' || lower === 'agregar invitado') {
+    return { kind: 'START_ADD_GUEST' };
   }
 
   // Case-insensitive keyword match, but preserve original casing of the

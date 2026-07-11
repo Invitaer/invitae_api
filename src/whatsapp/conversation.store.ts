@@ -1,10 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { RedisService } from '../redis/redis.service';
+import { PendingAction } from './flow.machine';
 
 export interface ConversationContext {
   userId: string;
   currentEventId?: string;
-  pendingAction?: unknown;
+  pendingAction?: PendingAction;
 }
 
 const CONTEXT_TTL_SECONDS = 1800; // 30 minutes, sliding — refreshed on every `set`

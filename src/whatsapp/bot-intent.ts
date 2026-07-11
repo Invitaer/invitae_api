@@ -4,9 +4,9 @@ export type RsvpFilterStatus = 'ACCEPTED' | 'PENDING' | 'DECLINED';
  * Typed union of every command the bot can recognize from an inbound
  * WhatsApp message (free text or an interactive button/list reply).
  *
- * Slice 3 scope: READ commands only. Write flows (agregar/editar,
- * confirmar/rechazar) are introduced in Slice 4 and are intentionally
- * absent from this union until then.
+ * Slice 4 adds write-flow intents: starting the agregar/editar state
+ * machines, confirming a pending write-flow step, and the button-only
+ * confirmar/rechazar RSVP actions.
  */
 export type BotIntent =
   | { kind: 'MENU' }
@@ -17,4 +17,9 @@ export type BotIntent =
   | { kind: 'FILTER_BY_STATUS'; status: RsvpFilterStatus }
   | { kind: 'RSVP_SUMMARY' }
   | { kind: 'CANCEL' }
+  | { kind: 'START_ADD_GUEST' }
+  | { kind: 'START_EDIT_GUEST'; guestId: string }
+  | { kind: 'CONFIRM_ACTION' }
+  | { kind: 'RSVP_CONFIRM'; guestId: string }
+  | { kind: 'RSVP_DECLINE'; guestId: string }
   | { kind: 'UNKNOWN' };
