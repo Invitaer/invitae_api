@@ -16,6 +16,7 @@ import {
 } from './flow.machine';
 import { CreateGuestDto } from '../admin/guests/dto/create-guest.dto';
 import { UpdateGuestDto } from '../admin/guests/dto/update-guest.dto';
+import { WhatsappReply, textReply, buttonsReply, listReply } from './whatsapp-reply';
 
 export interface WhatsappWebhookPayload {
   entry?: Array<{
@@ -119,14 +120,41 @@ export class WhatsappService {
     const reply = consumedByFlow
       ? await this.handleFlowInput(ctx, phoneNumber, text, intent)
       : await this.dispatch(intent, ctx, phoneNumber);
-    await this.whatsappClient.sendText(phoneNumber, reply);
+    await this.sendReply(phoneNumber, reply);
+  }
+
+  /**
+   * Single call site that maps a `WhatsappReply` to the matching
+   * `WhatsappClient` sender. Every reply builder in this service returns a
+   * `WhatsappReply` value instead of calling the client directly — this is
+   * the ONLY place that decides text vs. interactive-buttons vs.
+   * interactive-list, keeping "exactly one outbound message per handled
+   * inbound message" enforceable in one spot.
+   */
+  private async sendReply(phoneNumber: string, reply: WhatsappReply): Promise<void> {
+    switch (reply.kind) {
+      case 'text':
+        await this.whatsappClient.sendText(phoneNumber, reply.body);
+        return;
+      case 'buttons':
+        await this.whatsappClient.sendInteractiveButtons(phoneNumber, reply.body, reply.buttons);
+        return;
+      case 'list':
+        await this.whatsappClient.sendInteractiveList(
+          phoneNumber,
+          reply.body,
+          reply.buttonLabel,
+          reply.rows,
+        );
+        return;
+    }
   }
 
   private async dispatch(
     intent: BotIntent,
     ctx: ConversationContext,
     phoneNumber: string,
-  ): Promise<string> {
+  ): Promise<WhatsappReply> {
     switch (intent.kind) {
       case 'MENU':
         return this.buildMenuReply();
@@ -169,31 +197,31 @@ export class WhatsappService {
 
       case 'CANCEL':
         await this.conversationStore.clear(phoneNumber);
-        return 'Operacion cancelada.';
+        return textReply('Operacion cancelada.');
 
       case 'START_ADD_GUEST':
         return this.withCurrentEvent(ctx, async () => {
           const pending = startAddGuestFlow();
           await this.conversationStore.set(phoneNumber, { ...ctx, pendingAction: pending });
-          return 'Vamos a agregar un invitado. Decime el nombre.';
+          return textReply('Vamos a agregar un invitado. Decime el nombre.');
         });
 
       case 'START_EDIT_GUEST':
         return this.withCurrentEvent(ctx, async () => {
           const pending = startEditGuestFlow(intent.guestId);
           await this.conversationStore.set(phoneNumber, { ...ctx, pendingAction: pending });
-          return 'Que campo queres editar? (nombre, telefono, email, tickets)';
+          return textReply('Que campo queres editar? (nombre, telefono, email, tickets)');
         });
 
       case 'CONFIRM_ACTION':
-        return 'No hay ninguna accion pendiente para confirmar.';
+        return textReply('No hay ninguna accion pendiente para confirmar.');
 
       case 'RSVP_CONFIRM':
         return this.withCurrentEvent(ctx, async (eventId) => {
           await this.guestsService.update(eventId, intent.guestId, {
             rsvpStatus: 'ACCEPTED',
           } as UpdateGuestDto);
-          return 'RSVP confirmado.';
+          return textReply('RSVP confirmado.');
         });
 
       case 'RSVP_DECLINE':
@@ -201,12 +229,12 @@ export class WhatsappService {
           await this.guestsService.update(eventId, intent.guestId, {
             rsvpStatus: 'DECLINED',
           } as UpdateGuestDto);
-          return 'RSVP marcado como rechazado.';
+          return textReply('RSVP marcado como rechazado.');
         });
 
       case 'UNKNOWN':
       default:
-        return 'No entendi ese comando. Envia "menu" para ver las opciones disponibles.';
+        return textReply('No entendi ese comando. Envia "menu" para ver las opciones disponibles.');
     }
   }
 
@@ -224,7 +252,7 @@ export class WhatsappService {
     phoneNumber: string,
     text: string,
     intent: BotIntent,
-  ): Promise<string> {
+  ): Promise<WhatsappReply> {
     const pending = ctx.pendingAction as PendingAction;
     const result =
       intent.kind === 'CONFIRM_ACTION'
@@ -234,13 +262,24 @@ export class WhatsappService {
     switch (result.status) {
       case 'CANCELLED':
         await this.conversationStore.clear(phoneNumber);
-        return result.message;
+        return textReply(result.message);
 
       case 'INVALID':
       case 'ADVANCED':
-      case 'AWAITING_CONFIRM':
         await this.conversationStore.set(phoneNumber, { ...ctx, pendingAction: result.pending });
-        return result.message;
+        return textReply(result.message);
+
+      case 'AWAITING_CONFIRM':
+        // The flow just reached its CONFIRM step (all data collected). The
+        // Destructive Action Confirmation requirement needs a REAL button
+        // for the organizer to tap — the ids below MUST match what
+        // `command.parser` recognizes ('confirm' -> CONFIRM_ACTION,
+        // 'cancel' -> CANCEL), otherwise this button would be untappable.
+        await this.conversationStore.set(phoneNumber, { ...ctx, pendingAction: result.pending });
+        return buttonsReply(result.message, [
+          { id: 'confirm', title: 'Confirmar' },
+          { id: 'cancel', title: 'Cancelar' },
+        ]);
 
       case 'COMPLETE':
         return this.completeFlow(result.pending, ctx, phoneNumber);
@@ -258,7 +297,7 @@ export class WhatsappService {
     pending: PendingAction,
     ctx: ConversationContext,
     phoneNumber: string,
-  ): Promise<string> {
+  ): Promise<WhatsappReply> {
     return this.withCurrentEvent(ctx, async (eventId) => {
       if (pending.flow === 'AGREGAR') {
         await this.guestsService.create(eventId, {
@@ -268,14 +307,14 @@ export class WhatsappService {
           email: pending.data.email,
         } as CreateGuestDto);
         await this.conversationStore.clear(phoneNumber);
-        return 'Invitado agregado correctamente.';
+        return textReply('Invitado agregado correctamente.');
       }
 
       await this.guestsService.update(eventId, pending.guestId, {
         [pending.field as string]: pending.value,
       } as UpdateGuestDto);
       await this.conversationStore.clear(phoneNumber);
-      return 'Invitado actualizado correctamente.';
+      return textReply('Invitado actualizado correctamente.');
     });
   }
 
@@ -289,15 +328,15 @@ export class WhatsappService {
     eventId: string,
     ctx: ConversationContext,
     phoneNumber: string,
-  ): Promise<string> {
+  ): Promise<WhatsappReply> {
     try {
       const event = await this.userEventsService.findOne(eventId, ctx.userId);
       const nextCtx: ConversationContext = { ...ctx, currentEventId: event.id };
       await this.conversationStore.set(phoneNumber, nextCtx);
-      return `Evento seleccionado: ${event.name}`;
+      return textReply(`Evento seleccionado: ${event.name}`);
     } catch (err) {
       if (err instanceof NotFoundException) {
-        return 'No tenes acceso a ese evento.';
+        return textReply('No tenes acceso a ese evento.');
       }
       throw err;
     }
@@ -313,10 +352,10 @@ export class WhatsappService {
    */
   private async withCurrentEvent(
     ctx: ConversationContext,
-    action: (eventId: string, event: Event) => Promise<string>,
-  ): Promise<string> {
+    action: (eventId: string, event: Event) => Promise<WhatsappReply>,
+  ): Promise<WhatsappReply> {
     if (!ctx.currentEventId) {
-      return 'No tenes un evento activo. Envia "mis eventos" para elegir uno.';
+      return textReply('No tenes un evento activo. Envia "mis eventos" para elegir uno.');
     }
 
     let event: Event;
@@ -324,7 +363,7 @@ export class WhatsappService {
       event = await this.userEventsService.findOne(ctx.currentEventId, ctx.userId);
     } catch (err) {
       if (err instanceof NotFoundException) {
-        return 'No tenes acceso a ese evento.';
+        return textReply('No tenes acceso a ese evento.');
       }
       throw err;
     }
@@ -332,54 +371,84 @@ export class WhatsappService {
     return action(ctx.currentEventId, event);
   }
 
-  private buildMenuReply(): string {
-    return [
-      'Menu principal:',
-      '- mis eventos',
-      '- detalle',
-      '- buscar <nombre>',
-      '- filtrar confirmados/pendientes/rechazados',
-      '- resumen',
-      '- cancelar',
-    ].join('\n');
+  private buildMenuReply(): WhatsappReply {
+    return textReply(
+      [
+        'Menu principal:',
+        '- mis eventos',
+        '- detalle',
+        '- buscar <nombre>',
+        '- filtrar confirmados/pendientes/rechazados',
+        '- resumen',
+        '- cancelar',
+      ].join('\n'),
+    );
   }
 
-  private buildEventsListReply(events: Pick<Event, 'id' | 'name'>[]): string {
+  /**
+   * "mis eventos" is what makes `SELECT_EVENT` reachable at all: it is the
+   * ONLY place the `select_event:{id}` row id is ever produced. The id sent
+   * here MUST match `SELECT_EVENT_PATTERN` in `command.parser.ts`.
+   */
+  private buildEventsListReply(events: Pick<Event, 'id' | 'name'>[]): WhatsappReply {
     if (events.length === 0) {
-      return 'No tenes eventos asociados todavia.';
+      return textReply('No tenes eventos asociados todavia.');
     }
-    return ['Tus eventos:', ...events.map((e) => `- ${e.name}`)].join('\n');
+    return listReply(
+      'Tus eventos:',
+      'Elegir evento',
+      events.map((e) => ({ id: `select_event:${e.id}`, title: e.name })),
+    );
   }
 
-  private buildEventDetailReply(event: Event): string {
-    return [
-      `Evento: ${event.name}`,
-      `Fecha: ${event.date}`,
-      `Lugar: ${event.location ?? 'sin especificar'}`,
-    ].join('\n');
+  private buildEventDetailReply(event: Event): WhatsappReply {
+    return textReply(
+      [
+        `Evento: ${event.name}`,
+        `Fecha: ${event.date}`,
+        `Lugar: ${event.location ?? 'sin especificar'}`,
+      ].join('\n'),
+    );
   }
 
-  private buildGuestListReply(guests: Array<{ name: string; rsvpStatus: string }>): string {
+  /**
+   * When a search matches exactly one guest, this doubles as the "guest
+   * detail view" the spec's Confirm/Reject-by-Button requirement refers to:
+   * it attaches `confirmar:{id}`/`rechazar:{id}` buttons for that guest
+   * (ids `command.parser` already recognizes as RSVP_CONFIRM/RSVP_DECLINE).
+   * Multiple matches stay a plain text list — WhatsApp interactive button
+   * messages are capped at 3 buttons and can't carry one pair per row.
+   */
+  private buildGuestListReply(
+    guests: Array<{ id: string; name: string; rsvpStatus: string }>,
+  ): WhatsappReply {
     if (guests.length === 0) {
-      return 'No se encontraron invitados que coincidan.';
+      return textReply('No se encontraron invitados que coincidan.');
     }
-    return guests.map((g) => `- ${g.name} (${g.rsvpStatus})`).join('\n');
+    if (guests.length === 1) {
+      const guest = guests[0];
+      return buttonsReply(`${guest.name} — estado: ${guest.rsvpStatus}`, [
+        { id: `confirmar:${guest.id}`, title: 'Confirmar' },
+        { id: `rechazar:${guest.id}`, title: 'Rechazar' },
+      ]);
+    }
+    return textReply(guests.map((g) => `- ${g.name} (${g.rsvpStatus})`).join('\n'));
   }
 
   private buildFilteredGuestsReply(
     status: RsvpFilterStatus,
     guests: Array<{ name: string }>,
-  ): string {
+  ): WhatsappReply {
     const label = RSVP_LABELS[status];
     if (guests.length === 0) {
-      return `${label}: no hay invitados en este estado.`;
+      return textReply(`${label}: no hay invitados en este estado.`);
     }
-    return [`${label}:`, ...guests.map((g) => `- ${g.name}`)].join('\n');
+    return textReply([`${label}:`, ...guests.map((g) => `- ${g.name}`)].join('\n'));
   }
 
   private buildSummaryReply(
     guests: Array<{ rsvpStatus: string; tickets: number }>,
-  ): string {
+  ): WhatsappReply {
     const totals = guests.reduce(
       (acc, g) => {
         acc.total += 1;
@@ -392,14 +461,16 @@ export class WhatsappService {
       { total: 0, accepted: 0, pending: 0, declined: 0, tickets: 0 },
     );
 
-    return [
-      'Resumen:',
-      `Total invitados: ${totals.total}`,
-      `Confirmados: ${totals.accepted}`,
-      `Pendientes: ${totals.pending}`,
-      `Rechazados: ${totals.declined}`,
-      `Tickets totales: ${totals.tickets}`,
-    ].join('\n');
+    return textReply(
+      [
+        'Resumen:',
+        `Total invitados: ${totals.total}`,
+        `Confirmados: ${totals.accepted}`,
+        `Pendientes: ${totals.pending}`,
+        `Rechazados: ${totals.declined}`,
+        `Tickets totales: ${totals.tickets}`,
+      ].join('\n'),
+    );
   }
 
   private extractMessage(payload: WhatsappWebhookPayload): WhatsappMessage | undefined {

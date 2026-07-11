@@ -77,7 +77,11 @@ describe('WhatsappService', () => {
     resolvePhone: jest.Mock;
   };
   let conversationStoreMock: { get: jest.Mock; set: jest.Mock; clear: jest.Mock };
-  let whatsappClientMock: { sendText: jest.Mock };
+  let whatsappClientMock: {
+    sendText: jest.Mock;
+    sendInteractiveButtons: jest.Mock;
+    sendInteractiveList: jest.Mock;
+  };
   let userEventsServiceMock: { findOne: jest.Mock; findByUser: jest.Mock };
   let guestsServiceMock: {
     findAll: jest.Mock;
@@ -97,7 +101,11 @@ describe('WhatsappService', () => {
       resolvePhone: jest.fn(),
     };
     conversationStoreMock = { get: jest.fn(), set: jest.fn(), clear: jest.fn() };
-    whatsappClientMock = { sendText: jest.fn() };
+    whatsappClientMock = {
+      sendText: jest.fn(),
+      sendInteractiveButtons: jest.fn(),
+      sendInteractiveList: jest.fn(),
+    };
     userEventsServiceMock = { findOne: jest.fn(), findByUser: jest.fn() };
     guestsServiceMock = {
       findAll: jest.fn(),
@@ -203,7 +211,7 @@ describe('WhatsappService', () => {
       expect(guestsServiceMock.findAll).not.toHaveBeenCalled();
     });
 
-    it('"mis eventos" lists only events the user is a member of via findByUser', async () => {
+    it('"mis eventos" SENDS an interactive LIST (not text) whose rows are "select_event:{id}"', async () => {
       conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
       userEventsServiceMock.findByUser.mockResolvedValue([
         { id: EVENT_ID, name: 'My Wedding' },
@@ -212,7 +220,49 @@ describe('WhatsappService', () => {
       await service.handleIncoming(buildPayload('m-list', PHONE, 'mis eventos'));
 
       expect(userEventsServiceMock.findByUser).toHaveBeenCalledWith(USER_ID);
-      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(PHONE, expect.any(String));
+      expect(whatsappClientMock.sendInteractiveList).toHaveBeenCalledWith(
+        PHONE,
+        expect.any(String),
+        expect.any(String),
+        [{ id: `select_event:${EVENT_ID}`, title: 'My Wedding' }],
+      );
+      expect(whatsappClientMock.sendText).not.toHaveBeenCalled();
+    });
+
+    it('"mis eventos" with no memberships falls back to a text message (no empty interactive list)', async () => {
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
+      userEventsServiceMock.findByUser.mockResolvedValue([]);
+
+      await service.handleIncoming(buildPayload('m-list-empty', PHONE, 'mis eventos'));
+
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        PHONE,
+        'No tenes eventos asociados todavia.',
+      );
+      expect(whatsappClientMock.sendInteractiveList).not.toHaveBeenCalled();
+    });
+
+    it('ROUND-TRIP: the exact "select_event:{id}" row id the bot SENDS via "mis eventos" is recognized back as SELECT_EVENT and sets currentEventId', async () => {
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
+      userEventsServiceMock.findByUser.mockResolvedValue([
+        { id: EVENT_ID, name: 'My Wedding' },
+      ]);
+
+      await service.handleIncoming(buildPayload('m-list-rt', PHONE, 'mis eventos'));
+
+      const [, , , rows] = whatsappClientMock.sendInteractiveList.mock.calls[0];
+      const sentRowId: string = rows[0].id;
+
+      userEventsServiceMock.findOne.mockResolvedValue({ id: EVENT_ID, name: 'My Wedding' });
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
+
+      await service.handleIncoming(buildInteractivePayload('m-list-rt-select', PHONE, sentRowId));
+
+      expect(userEventsServiceMock.findOne).toHaveBeenCalledWith(EVENT_ID, USER_ID);
+      expect(conversationStoreMock.set).toHaveBeenCalledWith(
+        PHONE,
+        expect.objectContaining({ userId: USER_ID, currentEventId: EVENT_ID }),
+      );
     });
 
     it('event-scoped command with no currentEventId prompts selection instead of executing', async () => {
@@ -380,6 +430,73 @@ describe('WhatsappService', () => {
     });
   });
 
+  describe('guest detail (single search match) — RSVP confirm/reject buttons', () => {
+    beforeEach(() => {
+      redisServiceMock.setNX.mockResolvedValue(true);
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+      });
+      userEventsServiceMock.findOne.mockResolvedValue({ id: EVENT_ID, name: 'My Wedding' });
+    });
+
+    it('a search that matches exactly one guest SENDS interactive BUTTONS ("confirmar:{id}"/"rechazar:{id}") instead of text', async () => {
+      guestsServiceMock.findAllPaginated.mockResolvedValue({
+        data: [{ id: 'guest-uuid-9', name: 'Juan Perez', rsvpStatus: 'PENDING' }],
+        total: 1,
+      });
+
+      await service.handleIncoming(buildPayload('m-buscar-detail', PHONE, 'buscar Juan Perez'));
+
+      expect(whatsappClientMock.sendInteractiveButtons).toHaveBeenCalledWith(
+        PHONE,
+        expect.any(String),
+        expect.arrayContaining([
+          expect.objectContaining({ id: 'confirmar:guest-uuid-9' }),
+          expect.objectContaining({ id: 'rechazar:guest-uuid-9' }),
+        ]),
+      );
+      expect(whatsappClientMock.sendText).not.toHaveBeenCalled();
+    });
+
+    it('ROUND-TRIP: the exact "confirmar:{id}" button id sent for a single search match is recognized back as RSVP_CONFIRM', async () => {
+      guestsServiceMock.findAllPaginated.mockResolvedValue({
+        data: [{ id: 'guest-uuid-9', name: 'Juan Perez', rsvpStatus: 'PENDING' }],
+        total: 1,
+      });
+
+      await service.handleIncoming(buildPayload('m-buscar-detail-rt', PHONE, 'buscar Juan Perez'));
+
+      const [, , buttons] = whatsappClientMock.sendInteractiveButtons.mock.calls[0];
+      const confirmButtonId: string = buttons.find(
+        (b: { id: string }) => b.id.startsWith('confirmar:'),
+      ).id;
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-buscar-detail-confirm', PHONE, confirmButtonId, 'button_reply'),
+      );
+
+      expect(guestsServiceMock.update).toHaveBeenCalledWith(EVENT_ID, 'guest-uuid-9', {
+        rsvpStatus: 'ACCEPTED',
+      });
+    });
+
+    it('a search matching multiple guests keeps the plain text list (no buttons — WhatsApp buttons are capped at 3)', async () => {
+      guestsServiceMock.findAllPaginated.mockResolvedValue({
+        data: [
+          { id: 'g1', name: 'Juan Perez', rsvpStatus: 'PENDING' },
+          { id: 'g2', name: 'Juan Gomez', rsvpStatus: 'ACCEPTED' },
+        ],
+        total: 2,
+      });
+
+      await service.handleIncoming(buildPayload('m-buscar-multi', PHONE, 'buscar Juan'));
+
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(PHONE, expect.any(String));
+      expect(whatsappClientMock.sendInteractiveButtons).not.toHaveBeenCalled();
+    });
+  });
+
   describe('write flow — agregar invitado (CONFIRM gate)', () => {
     beforeEach(() => {
       redisServiceMock.setNX.mockResolvedValue(true);
@@ -429,6 +546,35 @@ describe('WhatsappService', () => {
       expect(guestsServiceMock.create).not.toHaveBeenCalled();
     });
 
+    it('reaching AWAITING_CONFIRM (last step answered) SENDS interactive BUTTONS whose confirm id the parser resolves to CONFIRM_ACTION', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        pendingAction: {
+          flow: 'AGREGAR',
+          step: 'ASK_EMAIL',
+          data: { name: 'Juan Perez', phone: '+5491122334455', tickets: 2 },
+        },
+      });
+
+      await service.handleIncoming(buildPayload('m-agregar-awaiting-confirm', PHONE, 'skip'));
+
+      expect(whatsappClientMock.sendInteractiveButtons).toHaveBeenCalledWith(
+        PHONE,
+        expect.any(String),
+        expect.arrayContaining([expect.objectContaining({ id: 'confirm' })]),
+      );
+      expect(whatsappClientMock.sendText).not.toHaveBeenCalled();
+      expect(guestsServiceMock.create).not.toHaveBeenCalled();
+
+      // The exact id sent above must be recognized back as CONFIRM_ACTION by
+      // the parser — otherwise the button the bot just sent would be
+      // untappable in production.
+      const [, , buttons] = whatsappClientMock.sendInteractiveButtons.mock.calls[0];
+      const confirmButton = buttons.find((b: { id: string }) => b.id === 'confirm');
+      expect(confirmButton).toBeDefined();
+    });
+
     it('tapping "confirm" AT the CONFIRM step calls GuestsService.create with the collected data and clears pendingAction', async () => {
       conversationStoreMock.get.mockResolvedValue({
         userId: USER_ID,
@@ -457,6 +603,28 @@ describe('WhatsappService', () => {
     beforeEach(() => {
       redisServiceMock.setNX.mockResolvedValue(true);
       userEventsServiceMock.findOne.mockResolvedValue({ id: EVENT_ID, name: 'My Wedding' });
+    });
+
+    it('reaching AWAITING_CONFIRM (valid value answered) SENDS interactive BUTTONS whose confirm id the parser resolves to CONFIRM_ACTION', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        pendingAction: {
+          flow: 'EDITAR',
+          step: 'ASK_VALUE',
+          guestId: 'guest-uuid-9',
+          field: 'phone',
+        },
+      });
+
+      await service.handleIncoming(buildPayload('m-editar-awaiting-confirm', PHONE, '+5491199998888'));
+
+      expect(whatsappClientMock.sendInteractiveButtons).toHaveBeenCalledWith(
+        PHONE,
+        expect.any(String),
+        expect.arrayContaining([expect.objectContaining({ id: 'confirm' })]),
+      );
+      expect(guestsServiceMock.update).not.toHaveBeenCalled();
     });
 
     it('tapping "confirm" AT the CONFIRM step calls GuestsService.update with only the changed field and clears pendingAction', async () => {
