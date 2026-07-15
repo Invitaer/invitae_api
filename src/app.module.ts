@@ -10,6 +10,7 @@ import { UserEventsModule } from './user/events/user-events.module';
 import { InvitaeModule } from './invitae/invitae.module';
 import { AuthModule } from './auth/auth.module';
 import { CryptoModule } from './crypto/crypto.module';
+import { WhatsappModule } from './whatsapp/whatsapp.module';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { CryptoModule } from './crypto/crypto.module';
     AdminUsersModule,
     UserEventsModule,
     InvitaeModule,
+    WhatsappModule,
   ],
   controllers: [AppController],
   providers: [AppService],
