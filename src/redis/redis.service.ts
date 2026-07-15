@@ -55,6 +55,18 @@ export class RedisService implements OnModuleDestroy {
     return result === "OK";
   }
 
+  /**
+   * Compare-and-delete: deletes `key` only if its current value equals
+   * `value`. Used for safe lock release so a holder never deletes a lock that
+   * a later owner acquired after this one's TTL expired. Runs atomically as a
+   * single Lua script server-side.
+   */
+  async delIfEquals(key: string, value: string): Promise<void> {
+    const script =
+      "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
+    await this.client.eval(script, 1, key, value);
+  }
+
   async onModuleDestroy(): Promise<void> {
     if (RedisService.instance) {
       await RedisService.instance.quit();

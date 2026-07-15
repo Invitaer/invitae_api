@@ -28,9 +28,11 @@ export class WhatsappLinkService {
       return false;
     }
 
-    // Upsert on the unique phone_number: re-linking an already-linked phone
-    // (e.g. transferring it to another user) must be idempotent and NEVER
-    // throw on the unique constraint.
+    // Upsert on the unique phone_number to close the TOCTOU race between
+    // `resolvePhone` (in the caller) and this insert: two near-simultaneous
+    // redemptions for a still-unlinked phone would otherwise have the second
+    // insert throw on the unique constraint. This is race safety, NOT a
+    // user-facing "transfer this phone to another account" feature.
     await this.databaseService.db
       .insert(whatsappLinks)
       .values({

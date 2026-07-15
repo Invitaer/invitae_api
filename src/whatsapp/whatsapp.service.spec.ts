@@ -89,7 +89,8 @@ function mockRedisSetNX(
 
 describe('WhatsappService', () => {
   let service: WhatsappService;
-  let redisServiceMock: { setNX: jest.Mock; del: jest.Mock };
+  let redisServiceMock: { setNX: jest.Mock; del: jest.Mock; delIfEquals: jest.Mock };
+  let delaySpy: jest.SpyInstance;
   let whatsappLinkServiceMock: {
     verifyAndLink: jest.Mock;
     resolvePhone: jest.Mock;
@@ -113,7 +114,7 @@ describe('WhatsappService', () => {
   const EVENT_ID = 'event-uuid-1';
 
   beforeEach(async () => {
-    redisServiceMock = { setNX: jest.fn(), del: jest.fn() };
+    redisServiceMock = { setNX: jest.fn(), del: jest.fn(), delIfEquals: jest.fn() };
     // Default: lock acquired, message-id unseen. Individual tests override.
     mockRedisSetNX(redisServiceMock.setNX);
     whatsappLinkServiceMock = {
@@ -147,6 +148,12 @@ describe('WhatsappService', () => {
     }).compile();
 
     service = module.get<WhatsappService>(WhatsappService);
+
+    // Never sleep for real during lock backoff — the `delay` method is
+    // `protected` precisely so tests can stub it.
+    delaySpy = jest
+      .spyOn(service as unknown as { delay: (ms: number) => Promise<void> }, 'delay')
+      .mockResolvedValue(undefined);
 
     // Default: sender is linked, unless a test overrides it
     whatsappLinkServiceMock.resolvePhone.mockResolvedValue(USER_ID);
@@ -242,31 +249,62 @@ describe('WhatsappService', () => {
   });
 
   describe('per-user concurrency lock (F4)', () => {
-    it('does NOT dispatch and does NOT claim the message id when the lock is already held', async () => {
+    it('BLOCKER — never drops the message on lock contention: retries with backoff, then processes best-effort', async () => {
+      // Lock is never acquirable (all attempts fail). Because Meta will not
+      // retry a 200-acked webhook, the handler MUST still process the message.
       mockRedisSetNX(redisServiceMock.setNX, { lock: false });
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
 
-      await service.handleIncoming(buildPayload('m-locked', PHONE, 'menu'));
+      await service.handleIncoming(buildPayload('m-contended', PHONE, 'menu'));
 
-      expect(whatsappLinkServiceMock.resolvePhone).not.toHaveBeenCalled();
-      expect(conversationStoreMock.get).not.toHaveBeenCalled();
-      expect(whatsappClientMock.sendText).not.toHaveBeenCalled();
-      // The message id was NOT claimed, so Meta's retry can reprocess it.
-      expect(redisServiceMock.setNX).not.toHaveBeenCalledWith(
-        'wa:msg:m-locked',
+      // It backed off between attempts...
+      expect(delaySpy).toHaveBeenCalled();
+      // ...still claimed the message id and dispatched (best-effort)...
+      expect(redisServiceMock.setNX).toHaveBeenCalledWith(
+        'wa:msg:m-contended',
         expect.any(String),
         expect.any(Number),
       );
-      // Nothing to release — we never acquired the lock.
-      expect(redisServiceMock.del).not.toHaveBeenCalled();
+      expect(whatsappLinkServiceMock.resolvePhone).toHaveBeenCalledWith(PHONE);
+      expect(whatsappClientMock.sendText).toHaveBeenCalled();
+      // ...and never released a lock it does not hold.
+      expect(redisServiceMock.delIfEquals).not.toHaveBeenCalled();
     });
 
-    it('releases the per-user lock (del) after normal processing', async () => {
+    it('acquires on a later attempt when the lock frees mid-backoff, then processes normally', async () => {
+      // Fail the first two lock attempts, succeed on the third.
+      let lockAttempts = 0;
+      redisServiceMock.setNX.mockImplementation((key: string) => {
+        if (key.startsWith('wa:lock:')) {
+          lockAttempts += 1;
+          return Promise.resolve(lockAttempts >= 3);
+        }
+        return Promise.resolve(true); // msg-id claim
+      });
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
+
+      await service.handleIncoming(buildPayload('m-lock-eventual', PHONE, 'menu'));
+
+      expect(lockAttempts).toBe(3);
+      expect(delaySpy).toHaveBeenCalledTimes(2);
+      expect(whatsappClientMock.sendText).toHaveBeenCalled();
+      // Acquired -> released via compare-and-delete with its own token.
+      expect(redisServiceMock.delIfEquals).toHaveBeenCalledWith(
+        `wa:lock:${PHONE}`,
+        'm-lock-eventual',
+      );
+    });
+
+    it('CRITICAL — releases the per-user lock via compare-and-delete (token) after normal processing', async () => {
       mockRedisSetNX(redisServiceMock.setNX);
       conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
 
       await service.handleIncoming(buildPayload('m-lock-release', PHONE, 'menu'));
 
-      expect(redisServiceMock.del).toHaveBeenCalledWith(`wa:lock:${PHONE}`);
+      expect(redisServiceMock.delIfEquals).toHaveBeenCalledWith(
+        `wa:lock:${PHONE}`,
+        'm-lock-release',
+      );
     });
   });
 
@@ -316,6 +354,19 @@ describe('WhatsappService', () => {
       const [, body, , rows] = whatsappClientMock.sendInteractiveList.mock.calls[0];
       expect(rows.length).toBeLessThanOrEqual(10);
       expect(body).toContain('10');
+    });
+
+    it('FIX D — truncates a row title longer than WhatsApp\'s 24-char limit', async () => {
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
+      const longName = 'Boda de Maria y Juan en el Salon Grande'; // > 24 chars
+      userEventsServiceMock.findByUser.mockResolvedValue([{ id: EVENT_ID, name: longName }]);
+
+      await service.handleIncoming(buildPayload('m-list-longtitle', PHONE, 'mis eventos'));
+
+      const [, , , rows] = whatsappClientMock.sendInteractiveList.mock.calls[0];
+      expect(rows[0].title.length).toBeLessThanOrEqual(24);
+      // Row id still carries the FULL event id (only the title is clamped).
+      expect(rows[0].id).toBe(`select_event:${EVENT_ID}`);
     });
 
     it('"mis eventos" with no memberships falls back to a text message (no empty interactive list)', async () => {
@@ -706,6 +757,36 @@ describe('WhatsappService', () => {
       expect(guestsServiceMock.create).toHaveBeenCalled();
       expect(conversationStoreMock.clear).toHaveBeenCalledWith(PHONE);
       expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        PHONE,
+        expect.stringContaining('No pude guardar'),
+      );
+    });
+
+    it('FIX C — when the write SUCCEEDS but clearing the conversation throws, the user still gets the SUCCESS reply (no false failure -> no duplicate retry)', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        pendingAction: {
+          flow: 'AGREGAR',
+          step: 'CONFIRM',
+          data: { name: 'Juan Perez', phone: '+5491122334455', tickets: 2, email: 'juan@example.com' },
+        },
+      });
+      guestsServiceMock.create.mockResolvedValue({ id: 'guest-new' });
+      // The write already committed — a clear() failure must NOT be reported as
+      // a write failure, or the user would retry and duplicate the guest.
+      conversationStoreMock.clear.mockRejectedValue(new Error('redis down'));
+
+      await expect(
+        service.handleIncoming(buildInteractivePayload('m-agregar-clearfail', PHONE, 'confirm')),
+      ).resolves.toBeUndefined();
+
+      expect(guestsServiceMock.create).toHaveBeenCalled();
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        PHONE,
+        'Invitado agregado correctamente.',
+      );
+      expect(whatsappClientMock.sendText).not.toHaveBeenCalledWith(
         PHONE,
         expect.stringContaining('No pude guardar'),
       );
