@@ -28,11 +28,22 @@ export class WhatsappLinkService {
       return false;
     }
 
-    await this.databaseService.db.insert(whatsappLinks).values({
-      userId,
-      phoneNumber,
-      verifiedAt: new Date(),
-    });
+    // Upsert on the unique phone_number to close the TOCTOU race between
+    // `resolvePhone` (in the caller) and this insert: two near-simultaneous
+    // redemptions for a still-unlinked phone would otherwise have the second
+    // insert throw on the unique constraint. This is race safety, NOT a
+    // user-facing "transfer this phone to another account" feature.
+    await this.databaseService.db
+      .insert(whatsappLinks)
+      .values({
+        userId,
+        phoneNumber,
+        verifiedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: whatsappLinks.phoneNumber,
+        set: { userId, verifiedAt: new Date() },
+      });
 
     await this.redisService.del(this.otpKey(code));
     return true;

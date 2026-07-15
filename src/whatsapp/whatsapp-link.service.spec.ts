@@ -14,17 +14,23 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { WhatsappLinkService } from './whatsapp-link.service';
 import { DatabaseService } from '../database/database.service';
 import { RedisService } from '../redis/redis.service';
+import { whatsappLinks } from '../database/schema';
 
 function buildMockDb(rows: unknown[] = []) {
   const returning = jest.fn().mockResolvedValue(rows);
-  const values = jest.fn().mockReturnValue({ returning });
+  const onConflictDoUpdate = jest.fn().mockResolvedValue(rows);
+  const values = jest.fn().mockReturnValue({ returning, onConflictDoUpdate });
   const insert = jest.fn().mockReturnValue({ values });
 
   const where = jest.fn().mockResolvedValue(rows);
   const from = jest.fn().mockReturnValue({ where });
   const select = jest.fn().mockReturnValue({ from });
 
-  return { insert, select, _internals: { returning, values, where, from } };
+  return {
+    insert,
+    select,
+    _internals: { returning, onConflictDoUpdate, values, where, from },
+  };
 }
 
 describe('WhatsappLinkService', () => {
@@ -71,6 +77,23 @@ describe('WhatsappLinkService', () => {
 
       expect(result).toBe(true);
       expect(dbServiceMock.db.insert).toHaveBeenCalled();
+      expect(redisServiceMock.del).toHaveBeenCalledWith('wa:otp:123456');
+    });
+
+    it('re-linking an already-linked phone upserts (onConflictDoUpdate) and returns true without throwing', async () => {
+      redisServiceMock.get.mockResolvedValue('user-uuid-2');
+      dbServiceMock.db = buildMockDb([]);
+
+      await expect(service.verifyAndLink('123456', '+5491100000000')).resolves.toBe(true);
+
+      expect(dbServiceMock.db.insert).toHaveBeenCalled();
+      expect(dbServiceMock.db._internals.values).toHaveBeenCalled();
+      expect(dbServiceMock.db._internals.onConflictDoUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          target: whatsappLinks.phoneNumber,
+          set: expect.objectContaining({ userId: 'user-uuid-2' }),
+        }),
+      );
       expect(redisServiceMock.del).toHaveBeenCalledWith('wa:otp:123456');
     });
 

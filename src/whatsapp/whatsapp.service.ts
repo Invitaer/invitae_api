@@ -47,6 +47,11 @@ interface WhatsappMessage {
 }
 
 const MESSAGE_ID_TTL_SECONDS = 86400; // 24h — enough to cover Meta's retry window
+const USER_LOCK_TTL_SECONDS = 15; // safety cap so a crashed handler can't wedge a user forever
+const USER_LOCK_MAX_ATTEMPTS = 5; // bounded wait so we NEVER drop a message on contention
+const USER_LOCK_BACKOFF_MS = 150; // delay between lock acquisition attempts
+const MAX_LIST_ROWS = 10; // WhatsApp interactive lists allow at most 10 rows
+const MAX_LIST_ROW_TITLE = 24; // WhatsApp interactive-list row titles are capped at 24 chars
 const OTP_CODE_PATTERN = /^\d{6}$/;
 
 const RSVP_LABELS: Record<RsvpFilterStatus, string> = {
@@ -74,53 +79,109 @@ export class WhatsappService {
       return;
     }
 
-    const claimed = await this.redisService.setNX(
-      `wa:msg:${message.id}`,
-      'processed',
-      MESSAGE_ID_TTL_SECONDS,
-    );
-
-    if (!claimed) {
-      this.logger.log(`Duplicate message_id ${message.id} — skipping reprocessing`);
-      return;
-    }
-
     const phoneNumber = message.from;
-    const text = message.text?.body?.trim() ?? '';
 
-    if (OTP_CODE_PATTERN.test(text)) {
-      const linked = await this.whatsappLinkService.verifyAndLink(text, phoneNumber);
-      if (!linked) {
-        this.logger.log(`Failed OTP verification attempt from ${phoneNumber}`);
+    // Serialize concurrent messages from the same user with a bounded-wait
+    // lock. The webhook controller replies 200 unconditionally, so Meta's
+    // Cloud API NEVER retries — returning early here would drop the message
+    // forever. Therefore, if the lock stays contended after all attempts, we
+    // process the message anyway (best-effort) rather than dropping it. The
+    // message-id dedup claim below still guards against genuine reprocessing.
+    const holdsLock = await this.acquireUserLock(phoneNumber, message.id);
+
+    try {
+      const claimed = await this.redisService.setNX(
+        `wa:msg:${message.id}`,
+        'processed',
+        MESSAGE_ID_TTL_SECONDS,
+      );
+
+      if (!claimed) {
+        this.logger.log(`Duplicate message_id ${message.id} — skipping reprocessing`);
+        return;
       }
-      return;
+
+      const text = message.text?.body?.trim() ?? '';
+
+      // Resolve the phone BEFORE any OTP handling. A 6-digit text is only an
+      // OTP attempt when the phone is UNLINKED — a linked user mid-flow could
+      // legitimately send a 6-digit value (e.g. a numeric field), and it must
+      // never hijack their active conversation.
+      const userId = await this.whatsappLinkService.resolvePhone(phoneNumber);
+      if (!userId) {
+        if (OTP_CODE_PATTERN.test(text)) {
+          const linked = await this.whatsappLinkService.verifyAndLink(text, phoneNumber);
+          if (!linked) {
+            this.logger.log(`Failed OTP verification attempt from ${phoneNumber}`);
+          }
+          return;
+        }
+        this.logger.log(`Unlinked phone ${phoneNumber} — replying with linking instructions`);
+        return;
+      }
+
+      const stored = await this.conversationStore.get(phoneNumber);
+      const ctx: ConversationContext = stored ?? { userId };
+
+      const interactiveId =
+        message.interactive?.button_reply?.id ?? message.interactive?.list_reply?.id;
+      const intent = parseCommand({ text, interactiveId });
+
+      // While a write-flow is active, every message is fed into the flow
+      // machine UNLESS it is an explicit CANCEL (always escapes, handled by
+      // `dispatch`'s CANCEL case) or a recognized command that isn't raw
+      // step-input/confirmation (e.g. "menu"), which is allowed to bypass the
+      // flow and dispatch normally.
+      const consumedByFlow =
+        !!ctx.pendingAction && (intent.kind === 'UNKNOWN' || intent.kind === 'CONFIRM_ACTION');
+
+      const reply = consumedByFlow
+        ? await this.handleFlowInput(ctx, phoneNumber, text, intent)
+        : await this.dispatch(intent, ctx, phoneNumber);
+      await this.sendReply(phoneNumber, reply);
+    } finally {
+      // Only release a lock we actually hold, and only if its value is still
+      // ours (compare-and-delete) — never steal a later handler's lock that
+      // was acquired after ours TTL-expired.
+      if (holdsLock) {
+        await this.redisService.delIfEquals(`wa:lock:${phoneNumber}`, message.id);
+      }
     }
+  }
 
-    const userId = await this.whatsappLinkService.resolvePhone(phoneNumber);
-    if (!userId) {
-      this.logger.log(`Unlinked phone ${phoneNumber} — replying with linking instructions`);
-      return;
+  /**
+   * Bounded-wait acquisition of the per-user lock. Retries `setNX` up to
+   * `USER_LOCK_MAX_ATTEMPTS` times with a `USER_LOCK_BACKOFF_MS` backoff.
+   * Returns `true` if the lock was acquired (caller must release it), or
+   * `false` if it stayed contended after every attempt — in which case the
+   * caller proceeds WITHOUT the lock (best-effort) so the message is never
+   * dropped. The token (`message.id`) makes release a safe compare-and-delete.
+   */
+  private async acquireUserLock(phoneNumber: string, token: string): Promise<boolean> {
+    for (let attempt = 1; attempt <= USER_LOCK_MAX_ATTEMPTS; attempt++) {
+      const acquired = await this.redisService.setNX(
+        `wa:lock:${phoneNumber}`,
+        token,
+        USER_LOCK_TTL_SECONDS,
+      );
+      if (acquired) {
+        return true;
+      }
+      if (attempt < USER_LOCK_MAX_ATTEMPTS) {
+        await this.delay(USER_LOCK_BACKOFF_MS);
+      }
     }
+    this.logger.warn(
+      `Could not acquire user lock for ${phoneNumber} after ${USER_LOCK_MAX_ATTEMPTS} attempts — processing best-effort without lock`,
+    );
+    return false;
+  }
 
-    const stored = await this.conversationStore.get(phoneNumber);
-    const ctx: ConversationContext = stored ?? { userId };
-
-    const interactiveId =
-      message.interactive?.button_reply?.id ?? message.interactive?.list_reply?.id;
-    const intent = parseCommand({ text, interactiveId });
-
-    // While a write-flow is active, every message is fed into the flow
-    // machine UNLESS it is an explicit CANCEL (always escapes, handled by
-    // `dispatch`'s CANCEL case) or a recognized command that isn't raw
-    // step-input/confirmation (e.g. "menu"), which is allowed to bypass the
-    // flow and dispatch normally.
-    const consumedByFlow =
-      !!ctx.pendingAction && (intent.kind === 'UNKNOWN' || intent.kind === 'CONFIRM_ACTION');
-
-    const reply = consumedByFlow
-      ? await this.handleFlowInput(ctx, phoneNumber, text, intent)
-      : await this.dispatch(intent, ctx, phoneNumber);
-    await this.sendReply(phoneNumber, reply);
+  /**
+   * Isolated so tests can stub the backoff instead of sleeping for real.
+   */
+  protected delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /**
@@ -299,23 +360,61 @@ export class WhatsappService {
     phoneNumber: string,
   ): Promise<WhatsappReply> {
     return this.withCurrentEvent(ctx, async (eventId) => {
-      if (pending.flow === 'AGREGAR') {
-        await this.guestsService.create(eventId, {
-          name: pending.data.name,
-          phone: pending.data.phone,
-          tickets: pending.data.tickets,
-          email: pending.data.email,
-        } as CreateGuestDto);
-        await this.conversationStore.clear(phoneNumber);
-        return textReply('Invitado agregado correctamente.');
+      // The try/catch wraps ONLY the write. If the write succeeds but a later
+      // step (clearing the conversation) throws, we must NOT tell the user the
+      // save failed — that would make them retry and create a DUPLICATE guest.
+      try {
+        if (pending.flow === 'AGREGAR') {
+          await this.guestsService.create(eventId, {
+            name: pending.data.name,
+            phone: pending.data.phone,
+            tickets: pending.data.tickets,
+            email: pending.data.email,
+          } as CreateGuestDto);
+        } else {
+          await this.guestsService.update(eventId, pending.guestId, {
+            [pending.field as string]: pending.value,
+          } as UpdateGuestDto);
+        }
+      } catch (err) {
+        // Write failed: don't leave the user stuck in CONFIRM. Clear the flow
+        // best-effort and report the failure instead of rethrowing (which
+        // would surface as a silent no-reply after they tapped confirm).
+        this.logger.error(
+          `Failed to persist guest write for ${phoneNumber}`,
+          err instanceof Error ? err.stack : String(err),
+        );
+        await this.clearConversationBestEffort(phoneNumber);
+        return textReply(
+          'No pude guardar los cambios por un error. Volve a intentarlo en unos minutos.',
+        );
       }
 
-      await this.guestsService.update(eventId, pending.guestId, {
-        [pending.field as string]: pending.value,
-      } as UpdateGuestDto);
-      await this.conversationStore.clear(phoneNumber);
-      return textReply('Invitado actualizado correctamente.');
+      // Write succeeded. A failure clearing the conversation here is logged and
+      // swallowed — never reported as a write failure.
+      await this.clearConversationBestEffort(phoneNumber);
+      return textReply(
+        pending.flow === 'AGREGAR'
+          ? 'Invitado agregado correctamente.'
+          : 'Invitado actualizado correctamente.',
+      );
     });
+  }
+
+  /**
+   * Clears the conversation context, swallowing (and logging) any error. Used
+   * after a guest write so a Redis hiccup while clearing never masquerades as a
+   * write failure — the write already succeeded and must be reported as such.
+   */
+  private async clearConversationBestEffort(phoneNumber: string): Promise<void> {
+    try {
+      await this.conversationStore.clear(phoneNumber);
+    } catch (err) {
+      this.logger.error(
+        `Failed to clear conversation for ${phoneNumber} after guest write`,
+        err instanceof Error ? err.stack : String(err),
+      );
+    }
   }
 
   /**
@@ -394,11 +493,29 @@ export class WhatsappService {
     if (events.length === 0) {
       return textReply('No tenes eventos asociados todavia.');
     }
-    return listReply(
-      'Tus eventos:',
-      'Elegir evento',
-      events.map((e) => ({ id: `select_event:${e.id}`, title: e.name })),
-    );
+    // WhatsApp interactive lists allow at most 10 rows — cap here and tell the
+    // user how to reach the rest instead of letting the API reject the message.
+    // Row titles are also capped at 24 chars (event names are varchar(255)).
+    const rows = events
+      .slice(0, MAX_LIST_ROWS)
+      .map((e) => ({ id: `select_event:${e.id}`, title: this.truncateRowTitle(e.name) }));
+    const body =
+      events.length > MAX_LIST_ROWS
+        ? `Tus eventos (mostrando los primeros ${MAX_LIST_ROWS} de ${events.length}). Usa "buscar" para encontrar el resto:`
+        : 'Tus eventos:';
+    return listReply(body, 'Elegir evento', rows);
+  }
+
+  /**
+   * WhatsApp rejects interactive-list row titles longer than 24 chars. Event
+   * names are `varchar(255)`, so clamp each title, keeping an ellipsis inside
+   * the 24-char budget when truncation happens.
+   */
+  private truncateRowTitle(title: string): string {
+    if (title.length <= MAX_LIST_ROW_TITLE) {
+      return title;
+    }
+    return `${title.slice(0, MAX_LIST_ROW_TITLE - 1)}…`;
   }
 
   private buildEventDetailReply(event: Event): WhatsappReply {
