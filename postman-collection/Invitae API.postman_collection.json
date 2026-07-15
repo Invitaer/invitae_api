@@ -1,0 +1,600 @@
+{
+  "info": {
+    "_postman_id": "e07c2060-f5d0-4bc2-81e2-7bd3769ccab9",
+    "name": "Invitae API",
+    "description": "API centralizada para el manejo de contenido en las invitaciones y administracion de invitados",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "6397712"
+  },
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"email\": \"admin123@invitae.com\",\n    \"password\": \"admin123\",\n    \"name\": \"Second Admin\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/register",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "register"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const response = pm.response.json();\r",
+                  "\r",
+                  "pm.environment.set(\"authToken\", response.access_token);\r",
+                  ""
+                ],
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {}
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"email\": \"admin123@invitae.com\",\n    \"password\": \"admin123\"\n}\n",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Public",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Confirm Attendance",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"guestId\": \"guest-uuid-here\",\n    \"attending\": true,\n    \"numberOfGuests\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/invitae/confirm",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "invitae",
+                "confirm"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Admin",
+      "item": [
+        {
+          "name": "Guests",
+          "item": [
+            {
+              "name": "Get All Guests",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{authToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/admin/guests",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "guests"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get Guest by ID",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{authToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/admin/guests/:id",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "guests",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Create Guest",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{authToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n    \"name\": \"Guest Name\",\n    \"email\": \"guest@example.com\",\n    \"phone\": \"+1234567890\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/admin/guests",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "guests"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Update Guest",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{authToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n    \"name\": \"Updated Name\",\n    \"attending\": true\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/admin/guests/:id",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "guests",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Delete Guest",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{authToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "method": "DELETE",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/admin/guests/:id",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "guests",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Content",
+          "item": [
+            {
+              "name": "Get All Content Keys",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{authToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/admin/content",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "content"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Get Content by Key",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{authToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/admin/content/:key",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "content",
+                    ":key"
+                  ],
+                  "variable": [
+                    {
+                      "key": "key",
+                      "value": "invitation:valeria-daniel-2026"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Set Content",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{authToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n    \"key\": \"welcome_message\",\n    \"value\": \"Bienvenidos a nuestra boda!\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/admin/content",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "content"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Delete Content",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{authToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "method": "DELETE",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/admin/content/:key",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "content",
+                    ":key"
+                  ],
+                  "variable": [
+                    {
+                      "key": "key"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Seed",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer <JWT_TOKEN>"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"metadata\": {\n    \"slug\": \"valeria-daniel-2026\",\n    \"eventType\": \"boda\",\n    \"language\": \"es\"\n  },\n  \"theme\": {\n    \"bgBase\": \"#f8f5f1\",\n    \"bgCard\": \"#ffffff\",\n    \"accent\": \"#c9a96e\",\n    \"text\": \"#1a1a1a\"\n  },\n  \"assets\": {\n    \"heroImage\": \"https://images.unsplash.com/photo-1511285560929-80b456fea0bc?q=80&w=1600&auto=format&fit=crop\",\n    \"music\": null\n  },\n  \"settings\": {\n    \"whatsappNumber\": \"521234567890\",\n    \"mapsUrl\": \"https://maps.google.com\",\n    \"musicAutoplay\": false\n  },\n  \"sections\": [\n    {\n      \"type\": \"hero\", \"enabled\": true, \"order\": 1,\n      \"data\": {\n        \"celebrantNames\": \"Valeria & Daniel\",\n        \"eventType\": \"Boda\",\n        \"subtitle\": \"Nos Casamos\",\n        \"eventDate\": \"Sábado, 14 de Noviembre 2026\",\n        \"backgroundImage\": \"https://images.unsplash.com/photo-1511285560929-80b456fea0bc?q=80&w=1600&auto=format&fit=crop\"\n      }\n    },\n    {\n      \"type\": \"countdown\", \"enabled\": true, \"order\": 2,\n      \"data\": {\n        \"targetDate\": \"2026-11-14T17:00:00\",\n        \"labels\": { \"days\": \"Días\", \"hours\": \"Horas\", \"minutes\": \"Minutos\", \"seconds\": \"Segundos\" },\n        \"finishedMessage\": \"¡Hoy es el gran día!\"\n      }\n    },\n    {\n      \"type\": \"story\", \"enabled\": true, \"order\": 3,\n      \"data\": {\n        \"title\": \"Nuestra Historia\",\n        \"timelineItems\": [\n          { \"year\": \"2019\", \"title\": \"Nuestro Primer Encuentro\", \"text\": \"Una conversación inesperada terminó cambiando nuestras vidas para siempre.\" },\n          { \"year\": \"2022\", \"title\": \"Aventuras Inolvidables\", \"text\": \"Viajes, sueños y momentos especiales nos hicieron crecer juntos.\" },\n          { \"year\": \"2025\", \"title\": \"El Sí Más Importante\", \"text\": \"Entre lágrimas y felicidad decidimos comenzar esta nueva etapa juntos.\" }\n        ]\n      }\n    },\n    {\n      \"type\": \"parents\", \"enabled\": true, \"order\": 4,\n      \"data\": {\n        \"title\": \"Con la bendición de nuestros padres\",\n        \"bride\": { \"mother\": \"María Elena García\", \"father\": \"Roberto García López\" },\n        \"groom\": { \"mother\": \"Carmen Sánchez Torres\", \"father\": \"Miguel Ángel Torres Ruiz\" },\n        \"message\": \"Con amor y gratitud celebramos este día junto a nuestras familias.\"\n      }\n    },\n    {\n      \"type\": \"godparents\", \"enabled\": true, \"order\": 5,\n      \"data\": {\n        \"title\": \"Nuestros Padrinos\",\n        \"godparents\": [\n          { \"category\": \"Ceremonia\", \"names\": \"Luis & Patricia Méndez\" },\n          { \"category\": \"Recepción\", \"names\": \"Carlos & Sofía Ramírez\" },\n          { \"category\": \"Ramo\", \"names\": \"Ana López de Vega\" },\n          { \"category\": \"Música\", \"names\": \"Fernando & Diana Castro\" },\n          { \"category\": \"Pastel\", \"names\": \"Javier & Mónica Salinas\" },\n          { \"category\": \"Viaje de Novios\", \"names\": \"Ricardo & Lorena Peña\" }\n        ]\n      }\n    },\n    {\n      \"type\": \"quote\", \"enabled\": true, \"order\": 6,\n      \"data\": {\n        \"quote\": \"El amor no consiste en mirarse el uno al otro, sino en mirar juntos en la misma dirección.\",\n        \"author\": \"Antoine de Saint-Exupéry\"\n      }\n    },\n    {\n      \"type\": \"ceremony\", \"enabled\": true, \"order\": 7,\n      \"data\": {\n        \"place\": \"Templo San José de Analco\",\n        \"address\": \"Av. Analco 1234, Col. Analco, Guadalajara, Jalisco\",\n        \"time\": \"5:00 PM\",\n        \"date\": \"Sábado 14 de Noviembre, 2026\",\n        \"mapsUrl\": \"https://maps.google.com\",\n        \"image\": \"https://images.unsplash.com/photo-1519167758481-83f550bb49b3?q=80&w=1200&auto=format&fit=crop\"\n      }\n    },\n    {\n      \"type\": \"reception\", \"enabled\": true, \"order\": 8,\n      \"data\": {\n        \"venue\": \"Hacienda Los Laureles\",\n        \"address\": \"Carretera a Chapala km 5.5, Tlajomulco, Jalisco\",\n        \"time\": \"7:00 PM\",\n        \"date\": \"Sábado 14 de Noviembre, 2026\",\n        \"parking\": \"Estacionamiento gratuito disponible\",\n        \"mapsUrl\": \"https://maps.google.com\",\n        \"image\": \"https://images.unsplash.com/photo-1519225421980-715cb0215aed?q=80&w=1200&auto=format&fit=crop\"\n      }\n    },\n    {\n      \"type\": \"party\", \"enabled\": true, \"order\": 9,\n      \"data\": {\n        \"location\": \"Hacienda Los Laureles — Salón Principal\",\n        \"DJ\": \"DJ Marcos & The Band\",\n        \"startTime\": \"10:00 PM\",\n        \"endTime\": \"3:00 AM\",\n        \"note\": \"After party sorpresa para los más fiesteros\"\n      }\n    },\n    {\n      \"type\": \"timeline\", \"enabled\": true, \"order\": 10,\n      \"data\": {\n        \"title\": \"Agenda Del Gran Día\",\n        \"events\": [\n          { \"hour\": \"4:30 PM\", \"title\": \"Recepción de invitados\", \"description\": \"Atrio del Templo San José\" },\n          { \"hour\": \"5:00 PM\", \"title\": \"Ceremonia religiosa\", \"description\": \"Templo San José de Analco\" },\n          { \"hour\": \"6:30 PM\", \"title\": \"Cóctel de bienvenida\", \"description\": \"Jardines de la Hacienda\" },\n          { \"hour\": \"8:00 PM\", \"title\": \"Cena\", \"description\": \"Salón Principal — Hacienda Los Laureles\" },\n          { \"hour\": \"10:00 PM\", \"title\": \"Baile y fiesta\", \"description\": \"DJ Marcos & The Band\" },\n          { \"hour\": \"2:00 AM\", \"title\": \"Vals de despedida\", \"description\": \"¡Hasta el amanecer!\" }\n        ]\n      }\n    },\n    {\n      \"type\": \"dresscode\", \"enabled\": true, \"order\": 11,\n      \"data\": {\n        \"mode\": \"Formal Elegante\",\n        \"colors\": [\n          { \"name\": \"Negro\", \"hex\": \"#1c1c1c\" },\n          { \"name\": \"Azul marino\", \"hex\": \"#1b2a4a\" },\n          { \"name\": \"Gris\", \"hex\": \"#8a8a8a\" },\n          { \"name\": \"Champagne\", \"hex\": \"#f0deb4\" },\n          { \"name\": \"Borgoña\", \"hex\": \"#722f37\" }\n        ],\n        \"restrictions\": [\"Evitar color blanco e ivory\", \"Sin mezclilla\", \"Sin accesorios extravagantes\"]\n      }\n    },\n    {\n      \"type\": \"gallery\", \"enabled\": true, \"order\": 12,\n      \"data\": {\n        \"title\": \"Nuestros Momentos\",\n        \"layout\": \"grid\",\n        \"images\": [\n          { \"src\": \"https://images.unsplash.com/photo-1520854221256-17451cc331bf?q=80&w=1200&auto=format&fit=crop\", \"alt\": \"Momento 1\" },\n          { \"src\": \"https://images.unsplash.com/photo-1519741497674-611481863552?q=80&w=1200&auto=format&fit=crop\", \"alt\": \"Momento 2\" },\n          { \"src\": \"https://images.unsplash.com/photo-1522673607200-164d1b6ce486?q=80&w=1200&auto=format&fit=crop\", \"alt\": \"Momento 3\" },\n          { \"src\": \"https://images.unsplash.com/photo-1465495976277-4387d4b0b4c6?q=80&w=1200&auto=format&fit=crop\", \"alt\": \"Momento 4\" },\n          { \"src\": \"https://images.unsplash.com/photo-1583939003579-730e3918a45a?q=80&w=1200&auto=format&fit=crop\", \"alt\": \"Momento 5\" },\n          { \"src\": \"https://images.unsplash.com/photo-1606216794074-735e91aa2c92?q=80&w=1200&auto=format&fit=crop\", \"alt\": \"Momento 6\" }\n        ]\n      }\n    },\n    {\n      \"type\": \"video\", \"enabled\": true, \"order\": 13,\n      \"data\": {\n        \"title\": \"Nuestra Historia en Video\",\n        \"videoUrl\": \"https://www.w3schools.com/html/mov_bbb.mp4\",\n        \"poster\": \"https://images.unsplash.com/photo-1511285560929-80b456fea0bc?q=80&w=1200&auto=format&fit=crop\"\n      }\n    },\n    {\n      \"type\": \"accommodation\", \"enabled\": true, \"order\": 14,\n      \"data\": {\n        \"title\": \"Hospedaje Recomendado\",\n        \"hotels\": [\n          { \"name\": \"Hotel Camino Real Guadalajara\", \"stars\": 5, \"distance\": \"10 min del venue\", \"phone\": \"+52 33 1234 5678\", \"address\": \"Av. Vallarta 5005, Guadalajara\" },\n          { \"name\": \"Hampton Inn & Suites\", \"stars\": 4, \"distance\": \"15 min del venue\", \"phone\": \"+52 33 8765 4321\", \"address\": \"Av. Americas 1600, Guadalajara\" },\n          { \"name\": \"Holiday Inn Express\", \"stars\": 3, \"distance\": \"12 min del venue\", \"phone\": \"+52 33 3456 7890\", \"address\": \"Periférico Sur 8510, Guadalajara\" }\n        ],\n        \"discounts\": [\n          { \"hotel\": \"Hotel Camino Real\", \"code\": \"VALYDANIEL2026\", \"discount\": \"15% descuento\" },\n          { \"hotel\": \"Hampton Inn & Suites\", \"code\": \"BODA2026\", \"discount\": \"10% descuento\" }\n        ]\n      }\n    },\n    {\n      \"type\": \"transportation\", \"enabled\": true, \"order\": 15,\n      \"data\": {\n        \"shuttleInfo\": {\n          \"enabled\": true,\n          \"departure\": \"Hotel Camino Real → Templo — Salida: 4:30 PM\",\n          \"return\": \"Hacienda → Hotel Camino Real — 1:00 AM y 3:00 AM\",\n          \"note\": \"Cupo limitado. Regístralo al confirmar asistencia.\"\n        },\n        \"parking\": \"Estacionamiento gratuito con valet parking en la Hacienda\",\n        \"uberCode\": \"Código VALEDANIEL10 — 10% de descuento en tu viaje\"\n      }\n    },\n    {\n      \"type\": \"giftregistry\", \"enabled\": true, \"order\": 16,\n      \"data\": {\n        \"title\": \"Mesa de Regalos\",\n        \"message\": \"Tu presencia es nuestro mejor regalo. Si deseas obsequiarnos algo, estas son nuestras opciones:\",\n        \"stores\": [\n          { \"name\": \"Liverpool\", \"detail\": \"Mesa no. 45678901\", \"url\": \"#\" },\n          { \"name\": \"Amazon México\", \"detail\": \"Lista: ValeydanielBoda2026\", \"url\": \"#\" }\n        ],\n        \"bankAccount\": {\n          \"bank\": \"BBVA\",\n          \"clabe\": \"012 180 0123456789 01\",\n          \"beneficiary\": \"Valeria García Torres\",\n          \"note\": \"Lluvia de sobres — transferencia electrónica\"\n        }\n      }\n    },\n    {\n      \"type\": \"rsvp\", \"enabled\": true, \"order\": 17,\n      \"data\": {\n        \"enabled\": true,\n        \"deadline\": \"1 de Octubre, 2026\",\n        \"maxGuests\": 2,\n        \"whatsappNumber\": \"521234567890\",\n        \"message\": \"Nos encantaría compartir este momento contigo. Por favor confirma tu asistencia.\"\n      }\n    },\n    {\n      \"type\": \"faq\", \"enabled\": true, \"order\": 18,\n      \"data\": {\n        \"title\": \"Preguntas Frecuentes\",\n        \"questions\": [\n          { \"q\": \"¿El evento es para niños?\", \"a\": \"Por el tipo de celebración, el evento es exclusivamente para adultos. ¡Agradecemos tu comprensión!\" },\n          { \"q\": \"¿Habrá servicio de shuttle?\", \"a\": \"Sí, contaremos con shuttle desde el Hotel Camino Real. El cupo es limitado, regístralo al confirmar asistencia.\" },\n          { \"q\": \"¿Puedo tomar fotos durante la ceremonia?\", \"a\": \"Pedimos un \\\"unplugged ceremony\\\". Por favor apaga tu celular durante la ceremonia. ¡Habrá fotógrafo profesional!\" },\n          { \"q\": \"¿Hay opciones de menú especiales?\", \"a\": \"Contamos con opciones vegetarianas y sin gluten. Indícanos tu preferencia al confirmar asistencia.\" },\n          { \"q\": \"¿Cuándo debo confirmar?\", \"a\": \"Antes del 1 de Octubre de 2026. Puedes hacerlo a través del formulario o por WhatsApp.\" }\n        ]\n      }\n    },\n    {\n      \"type\": \"socialwall\", \"enabled\": true, \"order\": 19,\n      \"data\": {\n        \"hashtag\": \"#ValeriaYDaniel2026\",\n        \"message\": \"Comparte tus momentos con nosotros usando nuestro hashtag oficial\",\n        \"instagramHandle\": \"@valeriaydaniel2026\",\n        \"instagramFeed\": []\n      }\n    },\n    {\n      \"type\": \"footer\", \"enabled\": true, \"order\": 20,\n      \"data\": {\n        \"hashtag\": \"#ValeriaYDaniel2026\",\n        \"thankYouMessage\": \"Gracias por ser parte de nuestra historia\",\n        \"coupleNames\": \"Valeria & Daniel\",\n        \"year\": \"2026\",\n        \"socialLinks\": [\n          { \"platform\": \"Instagram\", \"url\": \"#\" },\n          { \"platform\": \"WhatsApp\", \"url\": \"https://wa.me/521234567890\" },\n          { \"platform\": \"Contacto\", \"url\": \"mailto:boda@valeriaydaniel.com\" }\n        ]\n      }\n    }\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{baseUrl}}/admin/content/invitation",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "content",
+                    "invitation"
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Admin Index",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{authToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{authToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "requests": {},
+        "exec": [
+          ""
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "packages": {},
+        "requests": {},
+        "exec": [
+          ""
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000"
+    },
+    {
+      "key": "authToken",
+      "value": ""
+    }
+  ]
+}
