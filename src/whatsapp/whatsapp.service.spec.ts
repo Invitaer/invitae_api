@@ -69,9 +69,27 @@ function buildInteractivePayload(
   };
 }
 
+/**
+ * `handleIncoming` now issues TWO `setNX` calls per message: first the
+ * per-user lock (`wa:lock:{phone}`), then the message-id dedup claim
+ * (`wa:msg:{id}`). This helper installs a key-aware implementation so the
+ * lock acquisition succeeds by default and only the dedup key drives the
+ * duplicate path — mirroring production, where the lock is normally free.
+ */
+function mockRedisSetNX(
+  mock: jest.Mock,
+  opts: { lock?: boolean; msgId?: boolean } = {},
+): void {
+  const lock = opts.lock ?? true;
+  const msgId = opts.msgId ?? true;
+  mock.mockImplementation((key: string) =>
+    Promise.resolve(key.startsWith('wa:lock:') ? lock : msgId),
+  );
+}
+
 describe('WhatsappService', () => {
   let service: WhatsappService;
-  let redisServiceMock: { setNX: jest.Mock };
+  let redisServiceMock: { setNX: jest.Mock; del: jest.Mock };
   let whatsappLinkServiceMock: {
     verifyAndLink: jest.Mock;
     resolvePhone: jest.Mock;
@@ -95,7 +113,9 @@ describe('WhatsappService', () => {
   const EVENT_ID = 'event-uuid-1';
 
   beforeEach(async () => {
-    redisServiceMock = { setNX: jest.fn() };
+    redisServiceMock = { setNX: jest.fn(), del: jest.fn() };
+    // Default: lock acquired, message-id unseen. Individual tests override.
+    mockRedisSetNX(redisServiceMock.setNX);
     whatsappLinkServiceMock = {
       verifyAndLink: jest.fn(),
       resolvePhone: jest.fn(),
@@ -136,8 +156,9 @@ describe('WhatsappService', () => {
   });
 
   describe('idempotency', () => {
-    it('drops a duplicate message_id (setNX false) without resolving the link', async () => {
-      redisServiceMock.setNX.mockResolvedValue(false);
+    it('drops a duplicate message_id (dedup setNX false) without resolving the link', async () => {
+      // Lock acquired, but the message-id was already claimed → duplicate.
+      mockRedisSetNX(redisServiceMock.setNX, { msgId: false });
 
       await service.handleIncoming(buildPayload('msg-1', PHONE, 'hola'));
 
@@ -151,7 +172,7 @@ describe('WhatsappService', () => {
     });
 
     it('claims and dispatches an unseen message_id (setNX true)', async () => {
-      redisServiceMock.setNX.mockResolvedValue(true);
+      mockRedisSetNX(redisServiceMock.setNX);
 
       await service.handleIncoming(buildPayload('msg-2', PHONE, 'mis eventos'));
 
@@ -166,7 +187,7 @@ describe('WhatsappService', () => {
 
   describe('unlinked sender rejection', () => {
     it('does not touch the conversation store (no dispatch) when the phone has no verified link', async () => {
-      redisServiceMock.setNX.mockResolvedValue(true);
+      mockRedisSetNX(redisServiceMock.setNX);
       whatsappLinkServiceMock.resolvePhone.mockResolvedValue(null);
 
       await service.handleIncoming(buildPayload('msg-3', '+5491199999999', 'buscar Juan'));
@@ -176,7 +197,7 @@ describe('WhatsappService', () => {
     });
 
     it('resolves the conversation context (identity resolution) when the phone IS linked', async () => {
-      redisServiceMock.setNX.mockResolvedValue(true);
+      mockRedisSetNX(redisServiceMock.setNX);
 
       await service.handleIncoming(buildPayload('msg-4', PHONE, 'menu'));
 
@@ -185,20 +206,73 @@ describe('WhatsappService', () => {
   });
 
   describe('OTP verification routing', () => {
-    it('routes a 6-digit message to verifyAndLink instead of resolvePhone', async () => {
-      redisServiceMock.setNX.mockResolvedValue(true);
+    it('routes a 6-digit message from an UNLINKED phone to verifyAndLink (resolvePhone runs first and returns null)', async () => {
+      mockRedisSetNX(redisServiceMock.setNX);
+      whatsappLinkServiceMock.resolvePhone.mockResolvedValue(null); // unlinked
       whatsappLinkServiceMock.verifyAndLink.mockResolvedValue(true);
 
       await service.handleIncoming(buildPayload('msg-5', PHONE, '123456'));
 
+      // F1: the phone is resolved BEFORE the OTP branch — only an unlinked
+      // phone treats a 6-digit text as an OTP attempt.
+      expect(whatsappLinkServiceMock.resolvePhone).toHaveBeenCalledWith(PHONE);
       expect(whatsappLinkServiceMock.verifyAndLink).toHaveBeenCalledWith('123456', PHONE);
+    });
+
+    it('F1 — a LINKED user with an active flow who sends a 6-digit text is fed to the flow machine, NEVER verifyAndLink', async () => {
+      mockRedisSetNX(redisServiceMock.setNX);
+      // Linked user (default resolvePhone → USER_ID) already mid-flow.
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        pendingAction: { flow: 'AGREGAR', step: 'ASK_NAME', data: {} },
+      });
+
+      await service.handleIncoming(buildPayload('msg-otp-hijack', PHONE, '123456'));
+
+      // The 6-digit value must be consumed by the flow, not hijacked as an OTP.
+      expect(whatsappLinkServiceMock.verifyAndLink).not.toHaveBeenCalled();
+      expect(conversationStoreMock.set).toHaveBeenCalledWith(
+        PHONE,
+        expect.objectContaining({
+          pendingAction: expect.objectContaining({ step: 'ASK_PHONE' }),
+        }),
+      );
+    });
+  });
+
+  describe('per-user concurrency lock (F4)', () => {
+    it('does NOT dispatch and does NOT claim the message id when the lock is already held', async () => {
+      mockRedisSetNX(redisServiceMock.setNX, { lock: false });
+
+      await service.handleIncoming(buildPayload('m-locked', PHONE, 'menu'));
+
       expect(whatsappLinkServiceMock.resolvePhone).not.toHaveBeenCalled();
+      expect(conversationStoreMock.get).not.toHaveBeenCalled();
+      expect(whatsappClientMock.sendText).not.toHaveBeenCalled();
+      // The message id was NOT claimed, so Meta's retry can reprocess it.
+      expect(redisServiceMock.setNX).not.toHaveBeenCalledWith(
+        'wa:msg:m-locked',
+        expect.any(String),
+        expect.any(Number),
+      );
+      // Nothing to release — we never acquired the lock.
+      expect(redisServiceMock.del).not.toHaveBeenCalled();
+    });
+
+    it('releases the per-user lock (del) after normal processing', async () => {
+      mockRedisSetNX(redisServiceMock.setNX);
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
+
+      await service.handleIncoming(buildPayload('m-lock-release', PHONE, 'menu'));
+
+      expect(redisServiceMock.del).toHaveBeenCalledWith(`wa:lock:${PHONE}`);
     });
   });
 
   describe('command dispatch — menu and navigation', () => {
     beforeEach(() => {
-      redisServiceMock.setNX.mockResolvedValue(true);
+      mockRedisSetNX(redisServiceMock.setNX);
     });
 
     it('replies to "menu" without touching UserEventsService/GuestsService', async () => {
@@ -227,6 +301,21 @@ describe('WhatsappService', () => {
         [{ id: `select_event:${EVENT_ID}`, title: 'My Wedding' }],
       );
       expect(whatsappClientMock.sendText).not.toHaveBeenCalled();
+    });
+
+    it('F8 — caps the events interactive list at 10 rows and notes the truncation when there are more than 10 events', async () => {
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
+      const events = Array.from({ length: 14 }, (_, i) => ({
+        id: `evt-${i}`,
+        name: `Event ${i}`,
+      }));
+      userEventsServiceMock.findByUser.mockResolvedValue(events);
+
+      await service.handleIncoming(buildPayload('m-list-cap', PHONE, 'mis eventos'));
+
+      const [, body, , rows] = whatsappClientMock.sendInteractiveList.mock.calls[0];
+      expect(rows.length).toBeLessThanOrEqual(10);
+      expect(body).toContain('10');
     });
 
     it('"mis eventos" with no memberships falls back to a text message (no empty interactive list)', async () => {
@@ -291,7 +380,7 @@ describe('WhatsappService', () => {
 
   describe('command dispatch — ownership enforcement (membership re-validation)', () => {
     beforeEach(() => {
-      redisServiceMock.setNX.mockResolvedValue(true);
+      mockRedisSetNX(redisServiceMock.setNX);
     });
 
     it('SELECT_EVENT: a member CAN select their event and currentEventId gets persisted', async () => {
@@ -381,7 +470,7 @@ describe('WhatsappService', () => {
 
   describe('command dispatch — guest query commands', () => {
     beforeEach(() => {
-      redisServiceMock.setNX.mockResolvedValue(true);
+      mockRedisSetNX(redisServiceMock.setNX);
       conversationStoreMock.get.mockResolvedValue({
         userId: USER_ID,
         currentEventId: EVENT_ID,
@@ -432,7 +521,7 @@ describe('WhatsappService', () => {
 
   describe('guest detail (single search match) — RSVP confirm/reject buttons', () => {
     beforeEach(() => {
-      redisServiceMock.setNX.mockResolvedValue(true);
+      mockRedisSetNX(redisServiceMock.setNX);
       conversationStoreMock.get.mockResolvedValue({
         userId: USER_ID,
         currentEventId: EVENT_ID,
@@ -499,7 +588,7 @@ describe('WhatsappService', () => {
 
   describe('write flow — agregar invitado (CONFIRM gate)', () => {
     beforeEach(() => {
-      redisServiceMock.setNX.mockResolvedValue(true);
+      mockRedisSetNX(redisServiceMock.setNX);
       userEventsServiceMock.findOne.mockResolvedValue({ id: EVENT_ID, name: 'My Wedding' });
     });
 
@@ -597,11 +686,35 @@ describe('WhatsappService', () => {
       });
       expect(conversationStoreMock.clear).toHaveBeenCalledWith(PHONE);
     });
+
+    it('F3 — when GuestsService.create rejects, the flow is cleared and an error text is sent (no throw, no stuck CONFIRM)', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        pendingAction: {
+          flow: 'AGREGAR',
+          step: 'CONFIRM',
+          data: { name: 'Juan Perez', phone: '+5491122334455', tickets: 2, email: 'juan@example.com' },
+        },
+      });
+      guestsServiceMock.create.mockRejectedValue(new Error('db unavailable'));
+
+      await expect(
+        service.handleIncoming(buildInteractivePayload('m-agregar-fail', PHONE, 'confirm')),
+      ).resolves.toBeUndefined();
+
+      expect(guestsServiceMock.create).toHaveBeenCalled();
+      expect(conversationStoreMock.clear).toHaveBeenCalledWith(PHONE);
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        PHONE,
+        expect.stringContaining('No pude guardar'),
+      );
+    });
   });
 
   describe('write flow — editar invitado (CONFIRM gate)', () => {
     beforeEach(() => {
-      redisServiceMock.setNX.mockResolvedValue(true);
+      mockRedisSetNX(redisServiceMock.setNX);
       userEventsServiceMock.findOne.mockResolvedValue({ id: EVENT_ID, name: 'My Wedding' });
     });
 
@@ -669,7 +782,7 @@ describe('WhatsappService', () => {
 
   describe('RSVP confirm/reject buttons', () => {
     beforeEach(() => {
-      redisServiceMock.setNX.mockResolvedValue(true);
+      mockRedisSetNX(redisServiceMock.setNX);
       conversationStoreMock.get.mockResolvedValue({ userId: USER_ID, currentEventId: EVENT_ID });
       userEventsServiceMock.findOne.mockResolvedValue({ id: EVENT_ID, name: 'My Wedding' });
     });

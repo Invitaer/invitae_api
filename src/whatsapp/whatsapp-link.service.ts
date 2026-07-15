@@ -28,11 +28,20 @@ export class WhatsappLinkService {
       return false;
     }
 
-    await this.databaseService.db.insert(whatsappLinks).values({
-      userId,
-      phoneNumber,
-      verifiedAt: new Date(),
-    });
+    // Upsert on the unique phone_number: re-linking an already-linked phone
+    // (e.g. transferring it to another user) must be idempotent and NEVER
+    // throw on the unique constraint.
+    await this.databaseService.db
+      .insert(whatsappLinks)
+      .values({
+        userId,
+        phoneNumber,
+        verifiedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: whatsappLinks.phoneNumber,
+        set: { userId, verifiedAt: new Date() },
+      });
 
     await this.redisService.del(this.otpKey(code));
     return true;

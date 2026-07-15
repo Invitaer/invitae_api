@@ -47,6 +47,8 @@ interface WhatsappMessage {
 }
 
 const MESSAGE_ID_TTL_SECONDS = 86400; // 24h — enough to cover Meta's retry window
+const USER_LOCK_TTL_SECONDS = 15; // safety cap so a crashed handler can't wedge a user forever
+const MAX_LIST_ROWS = 10; // WhatsApp interactive lists allow at most 10 rows
 const OTP_CODE_PATTERN = /^\d{6}$/;
 
 const RSVP_LABELS: Record<RsvpFilterStatus, string> = {
@@ -74,53 +76,77 @@ export class WhatsappService {
       return;
     }
 
-    const claimed = await this.redisService.setNX(
-      `wa:msg:${message.id}`,
-      'processed',
-      MESSAGE_ID_TTL_SECONDS,
-    );
-
-    if (!claimed) {
-      this.logger.log(`Duplicate message_id ${message.id} — skipping reprocessing`);
-      return;
-    }
-
     const phoneNumber = message.from;
-    const text = message.text?.body?.trim() ?? '';
 
-    if (OTP_CODE_PATTERN.test(text)) {
-      const linked = await this.whatsappLinkService.verifyAndLink(text, phoneNumber);
-      if (!linked) {
-        this.logger.log(`Failed OTP verification attempt from ${phoneNumber}`);
+    // Serialize concurrent messages from the same user. The lock is acquired
+    // BEFORE the message-id dedup claim so that, when the lock is held, we
+    // return WITHOUT claiming the message id — leaving Meta's retry free to
+    // reprocess this exact message once the lock frees.
+    const gotLock = await this.redisService.setNX(
+      `wa:lock:${phoneNumber}`,
+      message.id,
+      USER_LOCK_TTL_SECONDS,
+    );
+    if (!gotLock) {
+      this.logger.log(
+        `Concurrent message for ${phoneNumber} — lock held, deferring ${message.id} to retry`,
+      );
+      return;
+    }
+
+    try {
+      const claimed = await this.redisService.setNX(
+        `wa:msg:${message.id}`,
+        'processed',
+        MESSAGE_ID_TTL_SECONDS,
+      );
+
+      if (!claimed) {
+        this.logger.log(`Duplicate message_id ${message.id} — skipping reprocessing`);
+        return;
       }
-      return;
+
+      const text = message.text?.body?.trim() ?? '';
+
+      // Resolve the phone BEFORE any OTP handling. A 6-digit text is only an
+      // OTP attempt when the phone is UNLINKED — a linked user mid-flow could
+      // legitimately send a 6-digit value (e.g. a numeric field), and it must
+      // never hijack their active conversation.
+      const userId = await this.whatsappLinkService.resolvePhone(phoneNumber);
+      if (!userId) {
+        if (OTP_CODE_PATTERN.test(text)) {
+          const linked = await this.whatsappLinkService.verifyAndLink(text, phoneNumber);
+          if (!linked) {
+            this.logger.log(`Failed OTP verification attempt from ${phoneNumber}`);
+          }
+          return;
+        }
+        this.logger.log(`Unlinked phone ${phoneNumber} — replying with linking instructions`);
+        return;
+      }
+
+      const stored = await this.conversationStore.get(phoneNumber);
+      const ctx: ConversationContext = stored ?? { userId };
+
+      const interactiveId =
+        message.interactive?.button_reply?.id ?? message.interactive?.list_reply?.id;
+      const intent = parseCommand({ text, interactiveId });
+
+      // While a write-flow is active, every message is fed into the flow
+      // machine UNLESS it is an explicit CANCEL (always escapes, handled by
+      // `dispatch`'s CANCEL case) or a recognized command that isn't raw
+      // step-input/confirmation (e.g. "menu"), which is allowed to bypass the
+      // flow and dispatch normally.
+      const consumedByFlow =
+        !!ctx.pendingAction && (intent.kind === 'UNKNOWN' || intent.kind === 'CONFIRM_ACTION');
+
+      const reply = consumedByFlow
+        ? await this.handleFlowInput(ctx, phoneNumber, text, intent)
+        : await this.dispatch(intent, ctx, phoneNumber);
+      await this.sendReply(phoneNumber, reply);
+    } finally {
+      await this.redisService.del(`wa:lock:${phoneNumber}`);
     }
-
-    const userId = await this.whatsappLinkService.resolvePhone(phoneNumber);
-    if (!userId) {
-      this.logger.log(`Unlinked phone ${phoneNumber} — replying with linking instructions`);
-      return;
-    }
-
-    const stored = await this.conversationStore.get(phoneNumber);
-    const ctx: ConversationContext = stored ?? { userId };
-
-    const interactiveId =
-      message.interactive?.button_reply?.id ?? message.interactive?.list_reply?.id;
-    const intent = parseCommand({ text, interactiveId });
-
-    // While a write-flow is active, every message is fed into the flow
-    // machine UNLESS it is an explicit CANCEL (always escapes, handled by
-    // `dispatch`'s CANCEL case) or a recognized command that isn't raw
-    // step-input/confirmation (e.g. "menu"), which is allowed to bypass the
-    // flow and dispatch normally.
-    const consumedByFlow =
-      !!ctx.pendingAction && (intent.kind === 'UNKNOWN' || intent.kind === 'CONFIRM_ACTION');
-
-    const reply = consumedByFlow
-      ? await this.handleFlowInput(ctx, phoneNumber, text, intent)
-      : await this.dispatch(intent, ctx, phoneNumber);
-    await this.sendReply(phoneNumber, reply);
   }
 
   /**
@@ -299,22 +325,37 @@ export class WhatsappService {
     phoneNumber: string,
   ): Promise<WhatsappReply> {
     return this.withCurrentEvent(ctx, async (eventId) => {
-      if (pending.flow === 'AGREGAR') {
-        await this.guestsService.create(eventId, {
-          name: pending.data.name,
-          phone: pending.data.phone,
-          tickets: pending.data.tickets,
-          email: pending.data.email,
-        } as CreateGuestDto);
-        await this.conversationStore.clear(phoneNumber);
-        return textReply('Invitado agregado correctamente.');
-      }
+      try {
+        if (pending.flow === 'AGREGAR') {
+          await this.guestsService.create(eventId, {
+            name: pending.data.name,
+            phone: pending.data.phone,
+            tickets: pending.data.tickets,
+            email: pending.data.email,
+          } as CreateGuestDto);
+          await this.conversationStore.clear(phoneNumber);
+          return textReply('Invitado agregado correctamente.');
+        }
 
-      await this.guestsService.update(eventId, pending.guestId, {
-        [pending.field as string]: pending.value,
-      } as UpdateGuestDto);
-      await this.conversationStore.clear(phoneNumber);
-      return textReply('Invitado actualizado correctamente.');
+        await this.guestsService.update(eventId, pending.guestId, {
+          [pending.field as string]: pending.value,
+        } as UpdateGuestDto);
+        await this.conversationStore.clear(phoneNumber);
+        return textReply('Invitado actualizado correctamente.');
+      } catch (err) {
+        // A write failure must NOT leave the user stuck in the CONFIRM state:
+        // clear the flow so their next message starts fresh, and tell them the
+        // save failed instead of rethrowing (which would surface as a silent
+        // no-reply after they already tapped confirm).
+        this.logger.error(
+          `Failed to persist guest write for ${phoneNumber}`,
+          err instanceof Error ? err.stack : String(err),
+        );
+        await this.conversationStore.clear(phoneNumber);
+        return textReply(
+          'No pude guardar los cambios por un error. Volve a intentarlo en unos minutos.',
+        );
+      }
     });
   }
 
@@ -394,11 +435,16 @@ export class WhatsappService {
     if (events.length === 0) {
       return textReply('No tenes eventos asociados todavia.');
     }
-    return listReply(
-      'Tus eventos:',
-      'Elegir evento',
-      events.map((e) => ({ id: `select_event:${e.id}`, title: e.name })),
-    );
+    // WhatsApp interactive lists allow at most 10 rows — cap here and tell the
+    // user how to reach the rest instead of letting the API reject the message.
+    const rows = events
+      .slice(0, MAX_LIST_ROWS)
+      .map((e) => ({ id: `select_event:${e.id}`, title: e.name }));
+    const body =
+      events.length > MAX_LIST_ROWS
+        ? `Tus eventos (mostrando los primeros ${MAX_LIST_ROWS} de ${events.length}). Usa "buscar" para encontrar el resto:`
+        : 'Tus eventos:';
+    return listReply(body, 'Elegir evento', rows);
   }
 
   private buildEventDetailReply(event: Event): WhatsappReply {
