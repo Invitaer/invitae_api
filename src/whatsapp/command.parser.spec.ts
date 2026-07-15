@@ -122,6 +122,51 @@ describe('parseCommand', () => {
       input: { text: '  MENU  ' },
       expected: { kind: 'MENU' },
     },
+    {
+      description: 'text "agregar" -> START_ADD_GUEST',
+      input: { text: 'agregar' },
+      expected: { kind: 'START_ADD_GUEST' },
+    },
+    {
+      description: 'text "agregar invitado" -> START_ADD_GUEST',
+      input: { text: 'agregar invitado' },
+      expected: { kind: 'START_ADD_GUEST' },
+    },
+    {
+      description: 'button reply id "add_guest" -> START_ADD_GUEST',
+      input: { interactiveId: 'add_guest' },
+      expected: { kind: 'START_ADD_GUEST' },
+    },
+    {
+      description: 'list reply id "edit_guest:g-1" -> START_EDIT_GUEST (no free-text NLP)',
+      input: { interactiveId: 'edit_guest:g-1' },
+      expected: { kind: 'START_EDIT_GUEST', guestId: 'g-1' },
+    },
+    {
+      description: 'free text "editar" alone is NOT a valid edit start (button/list only, needs a guestId)',
+      input: { text: 'editar' },
+      expected: { kind: 'UNKNOWN' },
+    },
+    {
+      description: 'button reply id "confirm" -> CONFIRM_ACTION',
+      input: { interactiveId: 'confirm' },
+      expected: { kind: 'CONFIRM_ACTION' },
+    },
+    {
+      description: 'free text "confirmar" alone is NOT CONFIRM_ACTION (button only, avoids ambiguity with RSVP confirmar)',
+      input: { text: 'confirmar' },
+      expected: { kind: 'UNKNOWN' },
+    },
+    {
+      description: 'button reply id "confirmar:g-1" -> RSVP_CONFIRM',
+      input: { interactiveId: 'confirmar:g-1' },
+      expected: { kind: 'RSVP_CONFIRM', guestId: 'g-1' },
+    },
+    {
+      description: 'button reply id "rechazar:g-1" -> RSVP_DECLINE',
+      input: { interactiveId: 'rechazar:g-1' },
+      expected: { kind: 'RSVP_DECLINE', guestId: 'g-1' },
+    },
   ];
 
   it.each(cases)('$description', ({ input, expected }) => {

@@ -79,7 +79,12 @@ describe('WhatsappService', () => {
   let conversationStoreMock: { get: jest.Mock; set: jest.Mock; clear: jest.Mock };
   let whatsappClientMock: { sendText: jest.Mock };
   let userEventsServiceMock: { findOne: jest.Mock; findByUser: jest.Mock };
-  let guestsServiceMock: { findAll: jest.Mock; findAllPaginated: jest.Mock };
+  let guestsServiceMock: {
+    findAll: jest.Mock;
+    findAllPaginated: jest.Mock;
+    create: jest.Mock;
+    update: jest.Mock;
+  };
 
   const USER_ID = 'user-uuid-1';
   const PHONE = '+5491100000000';
@@ -94,7 +99,12 @@ describe('WhatsappService', () => {
     conversationStoreMock = { get: jest.fn(), set: jest.fn(), clear: jest.fn() };
     whatsappClientMock = { sendText: jest.fn() };
     userEventsServiceMock = { findOne: jest.fn(), findByUser: jest.fn() };
-    guestsServiceMock = { findAll: jest.fn(), findAllPaginated: jest.fn() };
+    guestsServiceMock = {
+      findAll: jest.fn(),
+      findAllPaginated: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -367,6 +377,177 @@ describe('WhatsappService', () => {
       expect(guestsServiceMock.findAll).toHaveBeenCalledWith(EVENT_ID);
       const [, message] = whatsappClientMock.sendText.mock.calls[0];
       expect(message).toEqual(expect.any(String));
+    });
+  });
+
+  describe('write flow — agregar invitado (CONFIRM gate)', () => {
+    beforeEach(() => {
+      redisServiceMock.setNX.mockResolvedValue(true);
+      userEventsServiceMock.findOne.mockResolvedValue({ id: EVENT_ID, name: 'My Wedding' });
+    });
+
+    it('"agregar" with an active event starts the flow (pendingAction persisted) without calling GuestsService.create', async () => {
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID, currentEventId: EVENT_ID });
+
+      await service.handleIncoming(buildPayload('m-agregar', PHONE, 'agregar'));
+
+      expect(conversationStoreMock.set).toHaveBeenCalledWith(
+        PHONE,
+        expect.objectContaining({
+          pendingAction: { flow: 'AGREGAR', step: 'ASK_NAME', data: {} },
+        }),
+      );
+      expect(guestsServiceMock.create).not.toHaveBeenCalled();
+    });
+
+    it('CRITICAL — reaching the CONFIRM step without tapping confirm does NOT call GuestsService.create', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        pendingAction: {
+          flow: 'AGREGAR',
+          step: 'CONFIRM',
+          data: { name: 'Juan Perez', phone: '+5491122334455', tickets: 2 },
+        },
+      });
+
+      await service.handleIncoming(buildPayload('m-agregar-noconfirm', PHONE, 'si, dale'));
+
+      expect(guestsServiceMock.create).not.toHaveBeenCalled();
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(PHONE, expect.any(String));
+    });
+
+    it('CRITICAL — tapping "confirm" BEFORE reaching the CONFIRM step does NOT call GuestsService.create', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        pendingAction: { flow: 'AGREGAR', step: 'ASK_PHONE', data: { name: 'Juan Perez' } },
+      });
+
+      await service.handleIncoming(buildInteractivePayload('m-agregar-early-confirm', PHONE, 'confirm'));
+
+      expect(guestsServiceMock.create).not.toHaveBeenCalled();
+    });
+
+    it('tapping "confirm" AT the CONFIRM step calls GuestsService.create with the collected data and clears pendingAction', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        pendingAction: {
+          flow: 'AGREGAR',
+          step: 'CONFIRM',
+          data: { name: 'Juan Perez', phone: '+5491122334455', tickets: 2, email: 'juan@example.com' },
+        },
+      });
+
+      await service.handleIncoming(buildInteractivePayload('m-agregar-confirm', PHONE, 'confirm'));
+
+      expect(userEventsServiceMock.findOne).toHaveBeenCalledWith(EVENT_ID, USER_ID);
+      expect(guestsServiceMock.create).toHaveBeenCalledWith(EVENT_ID, {
+        name: 'Juan Perez',
+        phone: '+5491122334455',
+        tickets: 2,
+        email: 'juan@example.com',
+      });
+      expect(conversationStoreMock.clear).toHaveBeenCalledWith(PHONE);
+    });
+  });
+
+  describe('write flow — editar invitado (CONFIRM gate)', () => {
+    beforeEach(() => {
+      redisServiceMock.setNX.mockResolvedValue(true);
+      userEventsServiceMock.findOne.mockResolvedValue({ id: EVENT_ID, name: 'My Wedding' });
+    });
+
+    it('tapping "confirm" AT the CONFIRM step calls GuestsService.update with only the changed field and clears pendingAction', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        pendingAction: {
+          flow: 'EDITAR',
+          step: 'CONFIRM',
+          guestId: 'guest-uuid-9',
+          field: 'phone',
+          value: '+5491199998888',
+        },
+      });
+
+      await service.handleIncoming(buildInteractivePayload('m-editar-confirm', PHONE, 'confirm'));
+
+      expect(guestsServiceMock.update).toHaveBeenCalledWith(EVENT_ID, 'guest-uuid-9', {
+        phone: '+5491199998888',
+      });
+      expect(conversationStoreMock.clear).toHaveBeenCalledWith(PHONE);
+    });
+
+    it('reaching the CONFIRM step without tapping confirm does NOT call GuestsService.update', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        pendingAction: {
+          flow: 'EDITAR',
+          step: 'CONFIRM',
+          guestId: 'guest-uuid-9',
+          field: 'phone',
+          value: '+5491199998888',
+        },
+      });
+
+      await service.handleIncoming(buildPayload('m-editar-noconfirm', PHONE, 'listo'));
+
+      expect(guestsServiceMock.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('RSVP confirm/reject buttons', () => {
+    beforeEach(() => {
+      redisServiceMock.setNX.mockResolvedValue(true);
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID, currentEventId: EVENT_ID });
+      userEventsServiceMock.findOne.mockResolvedValue({ id: EVENT_ID, name: 'My Wedding' });
+    });
+
+    // NOTE ("never InvitaeService.confirmAttendance"): WhatsappService's
+    // constructor never injects InvitaeService (see whatsapp.module.ts —
+    // only UserEventsModule/GuestsModule are imported), so it is
+    // structurally impossible for this dispatch path to reach
+    // InvitaeService.confirmAttendance. The public confirmation flow lives
+    // entirely in a separate, unrelated module.
+    it('"confirmar:{guestId}" button calls GuestsService.update with rsvpStatus ACCEPTED', async () => {
+      await service.handleIncoming(
+        buildInteractivePayload('m-rsvp-confirm', PHONE, 'confirmar:guest-uuid-9'),
+      );
+
+      expect(userEventsServiceMock.findOne).toHaveBeenCalledWith(EVENT_ID, USER_ID);
+      expect(guestsServiceMock.update).toHaveBeenCalledWith(EVENT_ID, 'guest-uuid-9', {
+        rsvpStatus: 'ACCEPTED',
+      });
+    });
+
+    it('"rechazar:{guestId}" button calls GuestsService.update with rsvpStatus DECLINED', async () => {
+      await service.handleIncoming(
+        buildInteractivePayload('m-rsvp-decline', PHONE, 'rechazar:guest-uuid-9'),
+      );
+
+      expect(userEventsServiceMock.findOne).toHaveBeenCalledWith(EVENT_ID, USER_ID);
+      expect(guestsServiceMock.update).toHaveBeenCalledWith(EVENT_ID, 'guest-uuid-9', {
+        rsvpStatus: 'DECLINED',
+      });
+    });
+
+    it('CRITICAL — a non-member tapping confirmar is denied and GuestsService.update is NEVER called', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: 'attacker-uuid',
+        currentEventId: EVENT_ID,
+      });
+      userEventsServiceMock.findOne.mockRejectedValue(
+        new NotFoundException(`Event ${EVENT_ID} not found`),
+      );
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-rsvp-confirm-denied', PHONE, 'confirmar:guest-uuid-9'),
+      );
+
+      expect(guestsServiceMock.update).not.toHaveBeenCalled();
     });
   });
 });

@@ -8,6 +8,14 @@ import { GuestsService } from '../admin/guests/guests.service';
 import { parseCommand } from './command.parser';
 import { BotIntent, RsvpFilterStatus } from './bot-intent';
 import { Event } from '../database/schema';
+import {
+  advanceFlow,
+  startAddGuestFlow,
+  startEditGuestFlow,
+  PendingAction,
+} from './flow.machine';
+import { CreateGuestDto } from '../admin/guests/dto/create-guest.dto';
+import { UpdateGuestDto } from '../admin/guests/dto/update-guest.dto';
 
 export interface WhatsappWebhookPayload {
   entry?: Array<{
@@ -100,7 +108,17 @@ export class WhatsappService {
       message.interactive?.button_reply?.id ?? message.interactive?.list_reply?.id;
     const intent = parseCommand({ text, interactiveId });
 
-    const reply = await this.dispatch(intent, ctx, phoneNumber);
+    // While a write-flow is active, every message is fed into the flow
+    // machine UNLESS it is an explicit CANCEL (always escapes, handled by
+    // `dispatch`'s CANCEL case) or a recognized command that isn't raw
+    // step-input/confirmation (e.g. "menu"), which is allowed to bypass the
+    // flow and dispatch normally.
+    const consumedByFlow =
+      !!ctx.pendingAction && (intent.kind === 'UNKNOWN' || intent.kind === 'CONFIRM_ACTION');
+
+    const reply = consumedByFlow
+      ? await this.handleFlowInput(ctx, phoneNumber, text, intent)
+      : await this.dispatch(intent, ctx, phoneNumber);
     await this.whatsappClient.sendText(phoneNumber, reply);
   }
 
@@ -153,10 +171,112 @@ export class WhatsappService {
         await this.conversationStore.clear(phoneNumber);
         return 'Operacion cancelada.';
 
+      case 'START_ADD_GUEST':
+        return this.withCurrentEvent(ctx, async () => {
+          const pending = startAddGuestFlow();
+          await this.conversationStore.set(phoneNumber, { ...ctx, pendingAction: pending });
+          return 'Vamos a agregar un invitado. Decime el nombre.';
+        });
+
+      case 'START_EDIT_GUEST':
+        return this.withCurrentEvent(ctx, async () => {
+          const pending = startEditGuestFlow(intent.guestId);
+          await this.conversationStore.set(phoneNumber, { ...ctx, pendingAction: pending });
+          return 'Que campo queres editar? (nombre, telefono, email, tickets)';
+        });
+
+      case 'CONFIRM_ACTION':
+        return 'No hay ninguna accion pendiente para confirmar.';
+
+      case 'RSVP_CONFIRM':
+        return this.withCurrentEvent(ctx, async (eventId) => {
+          await this.guestsService.update(eventId, intent.guestId, {
+            rsvpStatus: 'ACCEPTED',
+          } as UpdateGuestDto);
+          return 'RSVP confirmado.';
+        });
+
+      case 'RSVP_DECLINE':
+        return this.withCurrentEvent(ctx, async (eventId) => {
+          await this.guestsService.update(eventId, intent.guestId, {
+            rsvpStatus: 'DECLINED',
+          } as UpdateGuestDto);
+          return 'RSVP marcado como rechazado.';
+        });
+
       case 'UNKNOWN':
       default:
         return 'No entendi ese comando. Envia "menu" para ver las opciones disponibles.';
     }
+  }
+
+  /**
+   * Consumes one message as input for the active write-flow (`agregar` or
+   * `editar`). A `CONFIRM_ACTION` intent (the "confirm" button) is fed as
+   * the flow's `CONFIRM` action; anything else is fed as raw text `INPUT`.
+   * `advanceFlow` is pure — it NEVER calls `GuestsService` itself. Only a
+   * `COMPLETE` result here triggers the actual write, and only after
+   * `withCurrentEvent` re-validates membership one more time (the flow may
+   * have been sitting idle for a while).
+   */
+  private async handleFlowInput(
+    ctx: ConversationContext,
+    phoneNumber: string,
+    text: string,
+    intent: BotIntent,
+  ): Promise<string> {
+    const pending = ctx.pendingAction as PendingAction;
+    const result =
+      intent.kind === 'CONFIRM_ACTION'
+        ? advanceFlow(pending, { type: 'CONFIRM' })
+        : advanceFlow(pending, { type: 'INPUT', value: text });
+
+    switch (result.status) {
+      case 'CANCELLED':
+        await this.conversationStore.clear(phoneNumber);
+        return result.message;
+
+      case 'INVALID':
+      case 'ADVANCED':
+      case 'AWAITING_CONFIRM':
+        await this.conversationStore.set(phoneNumber, { ...ctx, pendingAction: result.pending });
+        return result.message;
+
+      case 'COMPLETE':
+        return this.completeFlow(result.pending, ctx, phoneNumber);
+    }
+  }
+
+  /**
+   * Performs the actual `GuestsService.create`/`.update` write for a
+   * completed write-flow. Routed through `withCurrentEvent` — the SAME
+   * ownership choke point every other event-scoped operation uses — so
+   * membership is re-validated immediately before the write, never trusted
+   * from when the flow started.
+   */
+  private async completeFlow(
+    pending: PendingAction,
+    ctx: ConversationContext,
+    phoneNumber: string,
+  ): Promise<string> {
+    return this.withCurrentEvent(ctx, async (eventId) => {
+      if (pending.flow === 'AGREGAR') {
+        await this.guestsService.create(eventId, {
+          name: pending.data.name,
+          phone: pending.data.phone,
+          tickets: pending.data.tickets,
+          email: pending.data.email,
+        } as CreateGuestDto);
+        await this.conversationStore.clear(phoneNumber);
+        return 'Invitado agregado correctamente.';
+      }
+
+      await this.guestsService.update(eventId, pending.guestId, {
+        [pending.field as string]: pending.value,
+      } as UpdateGuestDto);
+      await this.conversationStore.clear(phoneNumber);
+      return 'Invitado actualizado correctamente.';
+    });
   }
 
   /**
