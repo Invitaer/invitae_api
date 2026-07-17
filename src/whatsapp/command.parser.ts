@@ -53,6 +53,8 @@ function parseInteractiveId(interactiveId: string): BotIntent | undefined {
   switch (interactiveId) {
     case 'menu':
       return { kind: 'MENU' };
+    case 'menu_more':
+      return { kind: 'MENU_MORE' };
     case 'list_events':
       return { kind: 'LIST_EVENTS' };
     case 'detalle':

@@ -1,22 +1,22 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { RedisService } from '../redis/redis.service';
-import { WhatsappLinkService } from './whatsapp-link.service';
-import { ConversationStore, ConversationContext } from './conversation.store';
-import { WhatsappClient } from './whatsapp.client';
-import { UserEventsService } from '../user/events/user-events.service';
+import { CreateGuestDto } from '../admin/guests/dto/create-guest.dto';
+import { UpdateGuestDto } from '../admin/guests/dto/update-guest.dto';
 import { GuestsService } from '../admin/guests/guests.service';
-import { parseCommand } from './command.parser';
-import { BotIntent, RsvpFilterStatus } from './bot-intent';
 import { Event } from '../database/schema';
+import { RedisService } from '../redis/redis.service';
+import { UserEventsService } from '../user/events/user-events.service';
+import { BotIntent, RsvpFilterStatus } from './bot-intent';
+import { parseCommand } from './command.parser';
+import { ConversationContext, ConversationStore } from './conversation.store';
 import {
+  PendingAction,
   advanceFlow,
   startAddGuestFlow,
   startEditGuestFlow,
-  PendingAction,
 } from './flow.machine';
-import { CreateGuestDto } from '../admin/guests/dto/create-guest.dto';
-import { UpdateGuestDto } from '../admin/guests/dto/update-guest.dto';
-import { WhatsappReply, textReply, buttonsReply, listReply } from './whatsapp-reply';
+import { WhatsappLinkService } from './whatsapp-link.service';
+import { WhatsappReply, buttonsReply, listReply, textReply } from './whatsapp-reply';
+import { WhatsappClient } from './whatsapp.client';
 
 export interface WhatsappWebhookPayload {
   entry?: Array<{
@@ -114,9 +114,25 @@ export class WhatsappService {
           if (!linked) {
             this.logger.log(`Failed OTP verification attempt from ${phoneNumber}`);
           }
+          await this.sendReply(
+            phoneNumber,
+            linked
+              ? textReply(
+                  'Listo, tu numero quedo vinculado a tu cuenta. Envia "menu" para ver que podes hacer.',
+                )
+              : textReply(
+                  'Ese codigo no es valido o expiro. Genera un PIN nuevo desde tu panel y volve a enviarlo.',
+                ),
+          );
           return;
         }
         this.logger.log(`Unlinked phone ${phoneNumber} — replying with linking instructions`);
+        await this.sendReply(
+          phoneNumber,
+          textReply(
+            'Hola! Soy el asistente de Invitae. Para administrar tus eventos desde aca, genera tu PIN de vinculacion en tu panel y envialo por este chat.',
+          ),
+        );
         return;
       }
 
@@ -220,6 +236,9 @@ export class WhatsappService {
       case 'MENU':
         return this.buildMenuReply();
 
+      case 'MENU_MORE':
+        return this.buildMoreOptionsReply();
+
       case 'LIST_EVENTS': {
         const events = await this.userEventsService.findByUser(ctx.userId);
         return this.buildEventsListReply(events);
@@ -264,7 +283,7 @@ export class WhatsappService {
         return this.withCurrentEvent(ctx, async () => {
           const pending = startAddGuestFlow();
           await this.conversationStore.set(phoneNumber, { ...ctx, pendingAction: pending });
-          return textReply('Vamos a agregar un invitado. Decime el nombre.');
+          return textReply('Vamos a agregar un invitado. Escribe el/los nombres.');
         });
 
       case 'START_EDIT_GUEST':
@@ -471,17 +490,27 @@ export class WhatsappService {
   }
 
   private buildMenuReply(): WhatsappReply {
-    return textReply(
-      [
-        'Menu principal:',
-        '- mis eventos',
-        '- detalle',
-        '- buscar <nombre>',
-        '- filtrar confirmados/pendientes/rechazados',
-        '- resumen',
-        '- cancelar',
-      ].join('\n'),
-    );
+    // Reply buttons are capped at 3: the two most common actions get a direct
+    // button, and "Mas opciones" (id must match the parser's MENU_MORE) opens
+    // the full list. Button ids must be parser-recognized or the button is dead.
+    return buttonsReply('Menu principal. Que queres hacer?', [
+      { id: 'list_events', title: 'Mis eventos' },
+      { id: 'add_guest', title: 'Agregar invitado' },
+      { id: 'menu_more', title: 'Mas opciones' },
+    ]);
+  }
+
+  private buildMoreOptionsReply(): WhatsappReply {
+    // The actions that don't fit on the 3 main-menu buttons. Row ids must match
+    // what `command.parser` recognizes. `buscar <nombre>` stays a typed command
+    // (it needs a free-text argument a list row cannot carry).
+    return listReply('Mas opciones', 'Ver opciones', [
+      { id: 'detalle', title: 'Detalle del evento' },
+      { id: 'resumen', title: 'Resumen' },
+      { id: 'filter:confirmados', title: 'Ver confirmados' },
+      { id: 'filter:pendientes', title: 'Ver pendientes' },
+      { id: 'filter:rechazados', title: 'Ver rechazados' },
+    ]);
   }
 
   /**

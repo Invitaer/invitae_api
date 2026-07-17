@@ -19,6 +19,7 @@ jest.mock('../admin/guests/guests.service');
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { WhatsappService } from './whatsapp.service';
+import { parseCommand } from './command.parser';
 import { RedisService } from '../redis/redis.service';
 import { WhatsappLinkService } from './whatsapp-link.service';
 import { ConversationStore } from './conversation.store';
@@ -248,6 +249,48 @@ describe('WhatsappService', () => {
     });
   });
 
+  describe('unlinked onboarding replies (mute-gap fix)', () => {
+    beforeEach(() => {
+      mockRedisSetNX(redisServiceMock.setNX);
+      whatsappLinkServiceMock.resolvePhone.mockResolvedValue(null); // unlinked
+    });
+
+    it('replies with linking instructions when an unlinked phone sends a non-PIN message', async () => {
+      await service.handleIncoming(buildPayload('m-unlinked-hello', '+5491199999999', 'hola'));
+
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        '+5491199999999',
+        expect.stringContaining('PIN'),
+      );
+      // Still no dispatch — an unlinked phone never resolves a conversation.
+      expect(conversationStoreMock.get).not.toHaveBeenCalled();
+    });
+
+    it('confirms the link when an unlinked phone sends a VALID PIN', async () => {
+      whatsappLinkServiceMock.verifyAndLink.mockResolvedValue(true);
+
+      await service.handleIncoming(buildPayload('m-pin-ok', PHONE, '123456'));
+
+      expect(whatsappLinkServiceMock.verifyAndLink).toHaveBeenCalledWith('123456', PHONE);
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        PHONE,
+        expect.stringContaining('vinculado'),
+      );
+    });
+
+    it('tells the user to retry when an unlinked phone sends an INVALID/expired PIN', async () => {
+      whatsappLinkServiceMock.verifyAndLink.mockResolvedValue(false);
+
+      await service.handleIncoming(buildPayload('m-pin-bad', PHONE, '000000'));
+
+      expect(whatsappLinkServiceMock.verifyAndLink).toHaveBeenCalledWith('000000', PHONE);
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        PHONE,
+        expect.stringContaining('no es valido'),
+      );
+    });
+  });
+
   describe('per-user concurrency lock (F4)', () => {
     it('BLOCKER — never drops the message on lock contention: retries with backoff, then processes best-effort', async () => {
       // Lock is never acquirable (all attempts fail). Because Meta will not
@@ -266,7 +309,7 @@ describe('WhatsappService', () => {
         expect.any(Number),
       );
       expect(whatsappLinkServiceMock.resolvePhone).toHaveBeenCalledWith(PHONE);
-      expect(whatsappClientMock.sendText).toHaveBeenCalled();
+      expect(whatsappClientMock.sendInteractiveButtons).toHaveBeenCalled();
       // ...and never released a lock it does not hold.
       expect(redisServiceMock.delIfEquals).not.toHaveBeenCalled();
     });
@@ -287,7 +330,7 @@ describe('WhatsappService', () => {
 
       expect(lockAttempts).toBe(3);
       expect(delaySpy).toHaveBeenCalledTimes(2);
-      expect(whatsappClientMock.sendText).toHaveBeenCalled();
+      expect(whatsappClientMock.sendInteractiveButtons).toHaveBeenCalled();
       // Acquired -> released via compare-and-delete with its own token.
       expect(redisServiceMock.delIfEquals).toHaveBeenCalledWith(
         `wa:lock:${PHONE}`,
@@ -313,14 +356,48 @@ describe('WhatsappService', () => {
       mockRedisSetNX(redisServiceMock.setNX);
     });
 
-    it('replies to "menu" without touching UserEventsService/GuestsService', async () => {
+    it('replies to "menu" with 3 interactive BUTTONS (not text/list) and without touching UserEventsService/GuestsService', async () => {
       conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
 
       await service.handleIncoming(buildPayload('m-menu', PHONE, 'menu'));
 
-      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(PHONE, expect.any(String));
+      expect(whatsappClientMock.sendInteractiveButtons).toHaveBeenCalled();
+      expect(whatsappClientMock.sendText).not.toHaveBeenCalled();
+      expect(whatsappClientMock.sendInteractiveList).not.toHaveBeenCalled();
       expect(userEventsServiceMock.findOne).not.toHaveBeenCalled();
       expect(guestsServiceMock.findAll).not.toHaveBeenCalled();
+    });
+
+    it('ROUND-TRIP: every "menu" button id is recognized by the parser and fits WhatsApp limits (max 3 buttons, 20-char titles)', async () => {
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
+
+      await service.handleIncoming(buildPayload('m-menu-rt', PHONE, 'menu'));
+
+      const [, , buttons] = whatsappClientMock.sendInteractiveButtons.mock.calls[0];
+      expect(buttons.length).toBeGreaterThan(0);
+      expect(buttons.length).toBeLessThanOrEqual(3); // WhatsApp reply-button cap
+      for (const button of buttons) {
+        // The exact id the bot SENDS must parse back to a real command.
+        expect(parseCommand({ interactiveId: button.id }).kind).not.toBe('UNKNOWN');
+        expect(button.title.length).toBeLessThanOrEqual(20); // WhatsApp button-title cap
+      }
+    });
+
+    it('"Mas opciones" (menu_more) opens an interactive LIST whose row ids the parser recognizes and fits WhatsApp limits', async () => {
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-menu-more', PHONE, 'menu_more', 'button_reply'),
+      );
+
+      expect(whatsappClientMock.sendInteractiveList).toHaveBeenCalled();
+      const [, , , rows] = whatsappClientMock.sendInteractiveList.mock.calls[0];
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.length).toBeLessThanOrEqual(10); // WhatsApp list cap
+      for (const row of rows) {
+        expect(parseCommand({ interactiveId: row.id }).kind).not.toBe('UNKNOWN');
+        expect(row.title.length).toBeLessThanOrEqual(24); // WhatsApp row-title cap
+      }
     });
 
     it('"mis eventos" SENDS an interactive LIST (not text) whose rows are "select_event:{id}"', async () => {

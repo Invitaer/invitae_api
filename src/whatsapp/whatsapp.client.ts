@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { secrets } from '../config/secrets';
+import { normalizeWhatsappRecipient } from './phone.util';
 
 interface InteractiveButton {
   id: string;
@@ -76,6 +77,9 @@ export class WhatsappClient {
 
   private async post(to: string, payload: Record<string, unknown>): Promise<void> {
     const url = `${secrets.WHATSAPP_API_URL}/${secrets.WHATSAPP_PHONE_NUMBER_ID}/messages`;
+    // The inbound `from`/wa_id is not always a valid send target (MX/AR carry an
+    // extra digit Meta rejects). Normalize here — the single outbound choke point.
+    const recipient = normalizeWhatsappRecipient(to);
 
     try {
       const response = await fetch(url, {
@@ -84,17 +88,17 @@ export class WhatsappClient {
           Authorization: `Bearer ${secrets.WHATSAPP_API_TOKEN}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...payload, to: recipient }),
       });
 
       if (!response.ok) {
         this.logger.error(
-          `WhatsApp Graph API responded with ${response.status} while sending to ${to}`,
+          `WhatsApp Graph API responded with ${response.status} while sending to ${recipient}`,
         );
       }
     } catch (err) {
       this.logger.error(
-        `Failed to send WhatsApp message to ${to}: ${(err as Error).message}`,
+        `Failed to send WhatsApp message to ${recipient}: ${(err as Error).message}`,
       );
     }
   }

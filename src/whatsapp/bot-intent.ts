@@ -10,6 +10,7 @@ export type RsvpFilterStatus = 'ACCEPTED' | 'PENDING' | 'DECLINED';
  */
 export type BotIntent =
   | { kind: 'MENU' }
+  | { kind: 'MENU_MORE' }
   | { kind: 'LIST_EVENTS' }
   | { kind: 'SELECT_EVENT'; eventId: string }
   | { kind: 'EVENT_DETAIL' }

@@ -28,6 +28,11 @@ describe('parseCommand', () => {
       expected: { kind: 'MENU' },
     },
     {
+      description: 'button reply id "menu_more" -> MENU_MORE (opens the full options list)',
+      input: { interactiveId: 'menu_more' },
+      expected: { kind: 'MENU_MORE' },
+    },
+    {
       description: 'text "mis eventos" -> LIST_EVENTS',
       input: { text: 'mis eventos' },
       expected: { kind: 'LIST_EVENTS' },
