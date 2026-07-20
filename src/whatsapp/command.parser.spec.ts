@@ -1,4 +1,4 @@
-import { parseCommand } from './command.parser';
+import { normalizeText, parseCommand } from './command.parser';
 import { BotIntent } from './bot-intent';
 
 describe('parseCommand', () => {
@@ -158,9 +158,9 @@ describe('parseCommand', () => {
       expected: { kind: 'CONFIRM_ACTION' },
     },
     {
-      description: 'free text "confirmar" alone is NOT CONFIRM_ACTION (button only, avoids ambiguity with RSVP confirmar)',
+      description: 'free text "confirmar" -> CONFIRM_ACTION (every button action is also typeable)',
       input: { text: 'confirmar' },
-      expected: { kind: 'UNKNOWN' },
+      expected: { kind: 'CONFIRM_ACTION' },
     },
     {
       description: 'button reply id "confirmar:g-1" -> RSVP_CONFIRM',
@@ -181,6 +181,135 @@ describe('parseCommand', () => {
   it('prioritizes interactiveId over text when both are present', () => {
     expect(parseCommand({ text: 'blah', interactiveId: 'menu' })).toEqual({
       kind: 'MENU',
+    });
+  });
+
+  describe('normalizeText', () => {
+    it.each([
+      ['Menu', 'menu'],
+      ['MENU', 'menu'],
+      ['Menú', 'menu'],
+      ['  menú  ', 'menu'],
+      ['¿menú?', 'menu'],
+      ['Menú!', 'menu'],
+      ['¡Sí!', 'si'],
+      ['añadir   invitado', 'anadir invitado'],
+      ['Mas   Opciones.', 'mas opciones'],
+    ])('normalizes %j -> %j', (input, expected) => {
+      expect(normalizeText(input)).toBe(expected);
+    });
+  });
+
+  describe('accent / case / punctuation insensitive matching', () => {
+    // The reported bug: "Menú" (with tilde) used to fall through to UNKNOWN
+    // because matching was exact equality on `toLowerCase()`.
+    it.each(['menu', 'Menu', 'MENU', 'Menú', 'menú', '  menú  ', '¿menú?', 'Menú!'])(
+      '%j -> MENU',
+      (text) => {
+        expect(parseCommand({ text })).toEqual({ kind: 'MENU' });
+      },
+    );
+
+    it('accepts an accented synonym of a multi-word command', () => {
+      expect(parseCommand({ text: '¿Más opciones?' })).toEqual({ kind: 'MENU_MORE' });
+    });
+
+    it('accepts "Añadir invitado" (n-tilde is stripped by normalization)', () => {
+      expect(parseCommand({ text: 'Añadir invitado' })).toEqual({ kind: 'START_ADD_GUEST' });
+    });
+  });
+
+  describe('free-text synonyms — every button action is reachable by typing', () => {
+    const synonyms: Array<[string[], BotIntent]> = [
+      [
+        ['menu', 'help', 'ayuda', 'opciones', 'inicio', 'comandos', 'hola', 'empezar', 'start'],
+        { kind: 'MENU' },
+      ],
+      [['mas opciones', 'otras opciones', 'ver opciones', 'mas'], { kind: 'MENU_MORE' }],
+      [
+        [
+          'mis eventos',
+          'eventos',
+          'ver eventos',
+          'listar eventos',
+          'cambiar evento',
+          'elegir evento',
+          'otro evento',
+        ],
+        { kind: 'LIST_EVENTS' },
+      ],
+      [
+        ['detalle', 'detalle del evento', 'informacion', 'info', 'ver evento', 'datos del evento'],
+        { kind: 'EVENT_DETAIL' },
+      ],
+      [
+        ['resumen', 'estadisticas', 'totales', 'conteo', 'numeros'],
+        { kind: 'RSVP_SUMMARY' },
+      ],
+      [['cancelar', 'cancela', 'salir', 'abortar', 'descartar'], { kind: 'CANCEL' }],
+      [
+        [
+          'agregar',
+          'agregar invitado',
+          'agregar usuario',
+          'anadir invitado',
+          'nuevo invitado',
+          'sumar invitado',
+          'alta invitado',
+          'agregar persona',
+        ],
+        { kind: 'START_ADD_GUEST' },
+      ],
+      [
+        ['confirmar', 'confirmo', 'si', 'ok', 'dale', 'correcto', 'acepto'],
+        { kind: 'CONFIRM_ACTION' },
+      ],
+      [['si continuar', 'continuar', 'seguir', 'mismo evento'], { kind: 'RESUME_EVENT' }],
+      [['confirmados'], { kind: 'FILTER_BY_STATUS', status: 'ACCEPTED' }],
+      [['pendientes'], { kind: 'FILTER_BY_STATUS', status: 'PENDING' }],
+      [['rechazados'], { kind: 'FILTER_BY_STATUS', status: 'DECLINED' }],
+    ];
+
+    for (const [phrases, expected] of synonyms) {
+      it.each(phrases)(`%j -> ${expected.kind}`, (text) => {
+        expect(parseCommand({ text })).toEqual(expected);
+      });
+    }
+
+    it('"sí" (accented) is accepted as a confirmation', () => {
+      expect(parseCommand({ text: 'sí' })).toEqual({ kind: 'CONFIRM_ACTION' });
+    });
+
+    it('"Sí, continuar" resumes the active event', () => {
+      expect(parseCommand({ text: 'Sí, continuar' })).toEqual({ kind: 'RESUME_EVENT' });
+    });
+
+    it('button id "resume_event" -> RESUME_EVENT', () => {
+      expect(parseCommand({ interactiveId: 'resume_event' })).toEqual({ kind: 'RESUME_EVENT' });
+    });
+
+    it('keeps event selection button-only — no free-text synonym maps to SELECT_EVENT', () => {
+      for (const text of ['elegir evento', 'otro evento', 'cambiar evento', 'seleccionar evento']) {
+        expect(parseCommand({ text }).kind).not.toBe('SELECT_EVENT');
+      }
+    });
+  });
+
+  describe('search command', () => {
+    it.each([
+      ['buscar Juan Perez', 'Juan Perez'],
+      ['busca Juan Perez', 'Juan Perez'],
+      ['buscar invitado Juan Perez', 'Juan Perez'],
+      ['status Maria', 'Maria'],
+    ])('%j -> SEARCH_GUEST term=%j', (text, term) => {
+      expect(parseCommand({ text })).toEqual({ kind: 'SEARCH_GUEST', term });
+    });
+
+    it('preserves the ORIGINAL casing and accents of the search term', () => {
+      expect(parseCommand({ text: 'BUSCAR María Ñuñez' })).toEqual({
+        kind: 'SEARCH_GUEST',
+        term: 'María Ñuñez',
+      });
     });
   });
 });

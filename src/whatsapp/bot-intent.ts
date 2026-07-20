@@ -7,6 +7,9 @@ export type RsvpFilterStatus = 'ACCEPTED' | 'PENDING' | 'DECLINED';
  * Slice 4 adds write-flow intents: starting the agregar/editar state
  * machines, confirming a pending write-flow step, and the button-only
  * confirmar/rechazar RSVP actions.
+ *
+ * `RESUME_EVENT` answers the "are we still working on this event?" gate the
+ * service raises after a period of inactivity.
  */
 export type BotIntent =
   | { kind: 'MENU' }
@@ -21,6 +24,7 @@ export type BotIntent =
   | { kind: 'START_ADD_GUEST' }
   | { kind: 'START_EDIT_GUEST'; guestId: string }
   | { kind: 'CONFIRM_ACTION' }
+  | { kind: 'RESUME_EVENT' }
   | { kind: 'RSVP_CONFIRM'; guestId: string }
   | { kind: 'RSVP_DECLINE'; guestId: string }
   | { kind: 'UNKNOWN' };

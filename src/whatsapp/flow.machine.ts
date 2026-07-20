@@ -109,7 +109,7 @@ function advanceAddGuestFlow(pending: AddGuestFlowState, input: string): FlowRes
         return {
           status: 'INVALID',
           pending,
-          message: 'Telefono invalido. Debe tener entre 8 y 15 digitos (podes incluir +).',
+          message: 'Telefono invalido. Debe tener entre 8 y 15 digitos (puedes incluir +).',
         };
       }
       const next: AddGuestFlowState = {
@@ -191,7 +191,7 @@ function pickEditField(pending: EditGuestFlowState, input: string): FlowResult {
     return {
       status: 'INVALID',
       pending,
-      message: 'Campo invalido. Elegi: nombre, telefono, email o tickets.',
+      message: 'Campo invalido. Elige: nombre, telefono, email o tickets.',
     };
   }
   const next: EditGuestFlowState = { ...pending, step: 'ASK_VALUE', field };
@@ -210,7 +210,7 @@ function askEditValue(pending: EditGuestFlowState, input: string): FlowResult {
     return {
       status: 'INVALID',
       pending,
-      message: 'Telefono invalido. Debe tener entre 8 y 15 digitos (podes incluir +).',
+      message: 'Telefono invalido. Debe tener entre 8 y 15 digitos (puedes incluir +).',
     };
   }
 

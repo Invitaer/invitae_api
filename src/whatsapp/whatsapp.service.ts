@@ -53,6 +53,44 @@ const USER_LOCK_BACKOFF_MS = 150; // delay between lock acquisition attempts
 const MAX_LIST_ROWS = 10; // WhatsApp interactive lists allow at most 10 rows
 const MAX_LIST_ROW_TITLE = 24; // WhatsApp interactive-list row titles are capped at 24 chars
 const OTP_CODE_PATTERN = /^\d{6}$/;
+/**
+ * How long a conversation may sit idle before the bot re-confirms which event
+ * it is talking about. MUST stay below the ConversationStore's 1800s TTL —
+ * otherwise the context would expire before this gate could ever fire, and the
+ * user would silently lose the active event instead of being asked about it.
+ */
+export const EVENT_CONFIRM_STALE_MS = 10 * 60 * 1000;
+
+/**
+ * The intents that operate on `ctx.currentEventId` (i.e. every one that ends
+ * up inside `withCurrentEvent`). Only these can trigger the re-confirmation
+ * gate — navigation intents like MENU or LIST_EVENTS must never be
+ * interrupted by it, or the user could not escape the prompt.
+ */
+const EVENT_SCOPED_INTENT_KINDS: ReadonlySet<BotIntent['kind']> = new Set([
+  'EVENT_DETAIL',
+  'RSVP_SUMMARY',
+  'SEARCH_GUEST',
+  'FILTER_BY_STATUS',
+  'START_ADD_GUEST',
+  'START_EDIT_GUEST',
+  'RSVP_CONFIRM',
+  'RSVP_DECLINE',
+]);
+
+/**
+ * The ONLY intents allowed to break out of an active write-flow. Everything
+ * else — including every recognized command synonym — is step input, because
+ * a guest name, email or field value can normalize to any of them. Keeping
+ * this list tiny and explicit is what stops `salir`/`info`/`resumen` from
+ * silently destroying or derailing an in-progress add/edit.
+ *
+ * Exported for the spec so the allowlist can be asserted directly.
+ */
+export const FLOW_ESCAPE_INTENT_KINDS: ReadonlySet<BotIntent['kind']> = new Set([
+  'CANCEL',
+  'MENU',
+]);
 
 const RSVP_LABELS: Record<RsvpFilterStatus, string> = {
   ACCEPTED: 'Confirmados',
@@ -118,10 +156,10 @@ export class WhatsappService {
             phoneNumber,
             linked
               ? textReply(
-                  'Listo, tu numero quedo vinculado a tu cuenta. Envia "menu" para ver que podes hacer.',
+                  'Listo, tu numero quedo vinculado a tu cuenta. Envia "menu" para ver que puedes hacer.',
                 )
               : textReply(
-                  'Ese codigo no es valido o expiro. Genera un PIN nuevo desde tu panel y volve a enviarlo.',
+                  'Ese codigo no es valido o expiro. Genera un PIN nuevo desde tu panel y vuelve a enviarlo.',
                 ),
           );
           return;
@@ -130,26 +168,42 @@ export class WhatsappService {
         await this.sendReply(
           phoneNumber,
           textReply(
-            'Hola! Soy el asistente de Invitae. Para administrar tus eventos desde aca, genera tu PIN de vinculacion en tu panel y envialo por este chat.',
+            'Hola! Soy el asistente de Invitae. Puedes administrar tus eventos, invitados, y notificaciones desde aqui, genera tu PIN de vinculacion en tu panel y envialo por este chat.',
           ),
         );
         return;
       }
 
       const stored = await this.conversationStore.get(phoneNumber);
-      const ctx: ConversationContext = stored ?? { userId };
+      // A stored context belongs to whoever owned this phone number when it
+      // was written. `verifyAndLink` upserts on the unique phoneNumber, so a
+      // number CAN be re-linked to a different account — if that happened, the
+      // stored event/flow state is another user's and must NEVER be reused.
+      const isStoredContextStale = !!stored && stored.userId !== userId;
+      if (isStoredContextStale) {
+        await this.discardStaleContextBestEffort(phoneNumber);
+      }
+      const ctx: ConversationContext = stored && !isStoredContextStale ? stored : { userId };
 
       const interactiveId =
         message.interactive?.button_reply?.id ?? message.interactive?.list_reply?.id;
       const intent = parseCommand({ text, interactiveId });
 
-      // While a write-flow is active, every message is fed into the flow
-      // machine UNLESS it is an explicit CANCEL (always escapes, handled by
-      // `dispatch`'s CANCEL case) or a recognized command that isn't raw
-      // step-input/confirmation (e.g. "menu"), which is allowed to bypass the
-      // flow and dispatch normally.
-      const consumedByFlow =
-        !!ctx.pendingAction && (intent.kind === 'UNKNOWN' || intent.kind === 'CONFIRM_ACTION');
+      // While a write-flow is active, almost everything the user types is step
+      // input — a guest could legitimately be named "Menu" or "Resumen", and
+      // an email or a ticket count can normalize to a recognized synonym too.
+      // Only the explicit escape hatches below may break out of the flow;
+      // EVERYTHING else is fed to the flow machine.
+      const consumedByFlow = !!ctx.pendingAction && !FLOW_ESCAPE_INTENT_KINDS.has(intent.kind);
+
+      // After a long silence, re-confirm WHICH event we are talking about
+      // before acting on it. Checked before dispatch so the parked intent can
+      // be replayed verbatim once the user answers.
+      const reconfirmReply = await this.maybeAskEventReconfirmation(intent, ctx, phoneNumber);
+      if (reconfirmReply) {
+        await this.sendReply(phoneNumber, reconfirmReply);
+        return;
+      }
 
       const reply = consumedByFlow
         ? await this.handleFlowInput(ctx, phoneNumber, text, intent)
@@ -162,6 +216,132 @@ export class WhatsappService {
       if (holdsLock) {
         await this.redisService.delIfEquals(`wa:lock:${phoneNumber}`, message.id);
       }
+    }
+  }
+
+  /**
+   * The "are we still on this event?" gate. Returns a reply ONLY when every
+   * condition holds: an event is active, the context has gone stale, no write
+   * flow is in progress (an in-flight add/edit is never interrupted), and the
+   * intent actually needs the current event. Anything else returns `undefined`
+   * so the caller dispatches normally.
+   *
+   * The event NAME is resolved through `withCurrentEvent`, the same ownership
+   * choke point every event-scoped command uses — so the name shown is real
+   * and membership is re-validated even here.
+   */
+  private async maybeAskEventReconfirmation(
+    intent: BotIntent,
+    ctx: ConversationContext,
+    phoneNumber: string,
+  ): Promise<WhatsappReply | undefined> {
+    if (!ctx.currentEventId || ctx.pendingAction) {
+      return undefined;
+    }
+    if (!EVENT_SCOPED_INTENT_KINDS.has(intent.kind)) {
+      return undefined;
+    }
+    if (ctx.lastInteractionAt === undefined) {
+      return undefined;
+    }
+
+    if (Date.now() - ctx.lastInteractionAt <= EVENT_CONFIRM_STALE_MS) {
+      // Fresh enough to proceed — but stamp the context so a long, chatty
+      // session of read-only commands never drifts into the stale window and
+      // interrupts the user mid-conversation.
+      await this.touchConversationBestEffort(ctx, phoneNumber);
+      return undefined;
+    }
+
+    return this.withCurrentEvent<WhatsappReply | undefined>(ctx, async (_eventId, event) => {
+      try {
+        await this.conversationStore.set(phoneNumber, { ...ctx, pendingIntent: intent });
+      } catch (err) {
+        // Never ask a question whose answer we cannot remember. Worse, an
+        // exception here would escape `handleIncoming` — the controller has no
+        // try/catch and there is no global exception filter, so it would 500
+        // AFTER the `wa:msg:{id}` dedup key was claimed, silently discarding
+        // Meta's retry. Falling through to normal dispatch answers the user's
+        // actual command instead.
+        this.logger.error(
+          `Failed to park pending intent for ${phoneNumber} — skipping event re-confirmation`,
+          err instanceof Error ? err.stack : String(err),
+        );
+        return undefined;
+      }
+      return buttonsReply(
+        `Paso un rato desde tu ultimo mensaje. Seguimos trabajando en "${event.name}"?`,
+        [
+          { id: 'resume_event', title: 'Si, continuar' },
+          { id: 'list_events', title: 'Elegir otro evento' },
+        ],
+      );
+    });
+  }
+
+  /**
+   * Refreshes `lastInteractionAt` (and the sliding TTL) without changing any
+   * identity or flow field. Any `pendingIntent` IS dropped: reaching this
+   * point means the gate did not fire and the message is being dispatched
+   * normally, which makes an intent parked during an earlier interruption
+   * obsolete. Re-persisting it verbatim would let the user scroll up, tap the
+   * old "Si, continuar" button, and replay a long-dead command.
+   *
+   * Failures are logged and swallowed — a Redis hiccup here must never stop
+   * the user's actual command from being answered.
+   */
+  private async touchConversationBestEffort(
+    ctx: ConversationContext,
+    phoneNumber: string,
+  ): Promise<void> {
+    await this.persistBestEffort(
+      phoneNumber,
+      this.withoutPendingIntent(ctx),
+      'refresh the conversation timestamp',
+    );
+  }
+
+  /**
+   * Writes a context, logging and swallowing any failure. Every best-effort
+   * persist funnels through here: the caller has already decided the user's
+   * reply, and `handleIncoming` is invoked from a controller with no
+   * try/catch and no global exception filter — so an escaping error would
+   * 500 the webhook AFTER the `wa:msg:{id}` dedup key was claimed, meaning
+   * Meta's retry is skipped and the message is lost outright.
+   */
+  private async persistBestEffort(
+    phoneNumber: string,
+    ctx: ConversationContext,
+    operation: string,
+  ): Promise<void> {
+    try {
+      await this.conversationStore.set(phoneNumber, ctx);
+    } catch (err) {
+      this.logger.error(
+        `Failed to ${operation} for ${phoneNumber}`,
+        err instanceof Error ? err.stack : String(err),
+      );
+    }
+  }
+
+  /**
+   * Deletes the whole stored context after a phone re-link is detected. This
+   * is the one case where `ConversationStore.clear` is right: the state does
+   * not belong to the current owner at all, so nothing in it — not even the
+   * active event — may be carried forward. Best-effort: failing to evict it
+   * must not block the new owner's message, which already ignores it.
+   */
+  private async discardStaleContextBestEffort(phoneNumber: string): Promise<void> {
+    this.logger.warn(
+      `Stored conversation for ${phoneNumber} belongs to a different user — discarding it`,
+    );
+    try {
+      await this.conversationStore.clear(phoneNumber);
+    } catch (err) {
+      this.logger.error(
+        `Failed to clear the re-linked conversation for ${phoneNumber}`,
+        err instanceof Error ? err.stack : String(err),
+      );
     }
   }
 
@@ -276,21 +456,51 @@ export class WhatsappService {
         });
 
       case 'CANCEL':
-        await this.conversationStore.clear(phoneNumber);
+        // Cancelling abandons the pending FLOW, not the conversation: the
+        // active event must survive, or the user has to re-pick it every time
+        // they back out of an add/edit.
+        await this.conversationStore.set(phoneNumber, this.withoutPending(ctx));
         return textReply('Operacion cancelada.');
+
+      case 'RESUME_EVENT': {
+        // Pop the parked intent and replay it so the user's original request
+        // runs without retyping. `pendingIntent` is only ever set by the
+        // re-confirmation gate, which never parks a RESUME_EVENT — so this
+        // cannot recurse.
+        const parked = ctx.pendingIntent;
+        const resumedCtx = this.withoutPending(ctx);
+        // Best-effort: if the pop cannot be persisted the user must STILL get
+        // their answer. Throwing here would leave the stale pendingIntent in
+        // Redis and re-ask the same question on the next message — an
+        // unbounded loop for as long as Redis stays unhealthy.
+        await this.persistBestEffort(
+          phoneNumber,
+          resumedCtx,
+          'persist the resumed conversation',
+        );
+        return parked
+          ? this.dispatch(parked, resumedCtx, phoneNumber)
+          : this.buildMenuReply();
+      }
 
       case 'START_ADD_GUEST':
         return this.withCurrentEvent(ctx, async () => {
           const pending = startAddGuestFlow();
-          await this.conversationStore.set(phoneNumber, { ...ctx, pendingAction: pending });
+          await this.conversationStore.set(phoneNumber, {
+            ...this.withoutPendingIntent(ctx),
+            pendingAction: pending,
+          });
           return textReply('Vamos a agregar un invitado. Escribe el/los nombres.');
         });
 
       case 'START_EDIT_GUEST':
         return this.withCurrentEvent(ctx, async () => {
           const pending = startEditGuestFlow(intent.guestId);
-          await this.conversationStore.set(phoneNumber, { ...ctx, pendingAction: pending });
-          return textReply('Que campo queres editar? (nombre, telefono, email, tickets)');
+          await this.conversationStore.set(phoneNumber, {
+            ...this.withoutPendingIntent(ctx),
+            pendingAction: pending,
+          });
+          return textReply('Que campo quieres editar? (nombre, telefono, email, tickets)');
         });
 
       case 'CONFIRM_ACTION':
@@ -334,19 +544,27 @@ export class WhatsappService {
     intent: BotIntent,
   ): Promise<WhatsappReply> {
     const pending = ctx.pendingAction as PendingAction;
+    // `CONFIRM` is only meaningful once the flow has actually reached its
+    // CONFIRM step. On an INPUT step a confirmation WORD ("si", "ok",
+    // "confirmar") is just data — a guest really can be named "Si" — so it is
+    // captured as input rather than firing a premature confirmation.
+    const awaitingConfirmation = pending.step === 'CONFIRM';
     const result =
-      intent.kind === 'CONFIRM_ACTION'
+      intent.kind === 'CONFIRM_ACTION' && awaitingConfirmation
         ? advanceFlow(pending, { type: 'CONFIRM' })
         : advanceFlow(pending, { type: 'INPUT', value: text });
 
     switch (result.status) {
       case 'CANCELLED':
-        await this.conversationStore.clear(phoneNumber);
+        await this.conversationStore.set(phoneNumber, this.withoutPending(ctx));
         return textReply(result.message);
 
       case 'INVALID':
       case 'ADVANCED':
-        await this.conversationStore.set(phoneNumber, { ...ctx, pendingAction: result.pending });
+        await this.conversationStore.set(phoneNumber, {
+          ...this.withoutPendingIntent(ctx),
+          pendingAction: result.pending,
+        });
         return textReply(result.message);
 
       case 'AWAITING_CONFIRM':
@@ -355,7 +573,10 @@ export class WhatsappService {
         // for the organizer to tap — the ids below MUST match what
         // `command.parser` recognizes ('confirm' -> CONFIRM_ACTION,
         // 'cancel' -> CANCEL), otherwise this button would be untappable.
-        await this.conversationStore.set(phoneNumber, { ...ctx, pendingAction: result.pending });
+        await this.conversationStore.set(phoneNumber, {
+          ...this.withoutPendingIntent(ctx),
+          pendingAction: result.pending,
+        });
         return buttonsReply(result.message, [
           { id: 'confirm', title: 'Confirmar' },
           { id: 'cancel', title: 'Cancelar' },
@@ -403,15 +624,15 @@ export class WhatsappService {
           `Failed to persist guest write for ${phoneNumber}`,
           err instanceof Error ? err.stack : String(err),
         );
-        await this.clearConversationBestEffort(phoneNumber);
+        await this.clearConversationBestEffort(ctx, phoneNumber);
         return textReply(
-          'No pude guardar los cambios por un error. Volve a intentarlo en unos minutos.',
+          'No pude guardar los cambios por un error. Vuelve a intentarlo en unos minutos.',
         );
       }
 
       // Write succeeded. A failure clearing the conversation here is logged and
       // swallowed — never reported as a write failure.
-      await this.clearConversationBestEffort(phoneNumber);
+      await this.clearConversationBestEffort(ctx, phoneNumber);
       return textReply(
         pending.flow === 'AGREGAR'
           ? 'Invitado agregado correctamente.'
@@ -421,19 +642,41 @@ export class WhatsappService {
   }
 
   /**
-   * Clears the conversation context, swallowing (and logging) any error. Used
-   * after a guest write so a Redis hiccup while clearing never masquerades as a
+   * Drops the pending flow/intent while PRESERVING the identity fields
+   * (`userId`, `currentEventId`). Finishing or cancelling one action must not
+   * make the bot forget which event the conversation is about — only genuinely
+   * abandoning the conversation warrants `ConversationStore.clear`.
+   */
+  private withoutPending(ctx: ConversationContext): ConversationContext {
+    const { pendingAction: _pendingAction, pendingIntent: _pendingIntent, ...rest } = ctx;
+    return rest;
+  }
+
+  /**
+   * Drops ONLY the parked `pendingIntent`, keeping any in-progress
+   * `pendingAction`. Used on every path that persists while handling a
+   * message normally — the parked intent is dead the moment a later message
+   * is dispatched instead of answering the gate.
+   */
+  private withoutPendingIntent(ctx: ConversationContext): ConversationContext {
+    const { pendingIntent: _pendingIntent, ...rest } = ctx;
+    return rest;
+  }
+
+  /**
+   * Persists the pending-free context, swallowing (and logging) any error.
+   * Used after a guest write so a Redis hiccup here never masquerades as a
    * write failure — the write already succeeded and must be reported as such.
    */
-  private async clearConversationBestEffort(phoneNumber: string): Promise<void> {
-    try {
-      await this.conversationStore.clear(phoneNumber);
-    } catch (err) {
-      this.logger.error(
-        `Failed to clear conversation for ${phoneNumber} after guest write`,
-        err instanceof Error ? err.stack : String(err),
-      );
-    }
+  private async clearConversationBestEffort(
+    ctx: ConversationContext,
+    phoneNumber: string,
+  ): Promise<void> {
+    await this.persistBestEffort(
+      phoneNumber,
+      this.withoutPending(ctx),
+      'clear the pending action after a guest write',
+    );
   }
 
   /**
@@ -449,12 +692,16 @@ export class WhatsappService {
   ): Promise<WhatsappReply> {
     try {
       const event = await this.userEventsService.findOne(eventId, ctx.userId);
-      const nextCtx: ConversationContext = { ...ctx, currentEventId: event.id };
+      // Switching events invalidates anything parked against the previous one.
+      const nextCtx: ConversationContext = {
+        ...this.withoutPending(ctx),
+        currentEventId: event.id,
+      };
       await this.conversationStore.set(phoneNumber, nextCtx);
       return textReply(`Evento seleccionado: ${event.name}`);
     } catch (err) {
       if (err instanceof NotFoundException) {
-        return textReply('No tenes acceso a ese evento.');
+        return textReply('No tienes acceso a ese evento.');
       }
       throw err;
     }
@@ -468,12 +715,12 @@ export class WhatsappService {
    * detalle/buscar/filtrar/resumen; a non-member never reaches GuestsService,
    * even if `currentEventId` is present in the stored context.
    */
-  private async withCurrentEvent(
+  private async withCurrentEvent<T extends WhatsappReply | undefined = WhatsappReply>(
     ctx: ConversationContext,
-    action: (eventId: string, event: Event) => Promise<WhatsappReply>,
-  ): Promise<WhatsappReply> {
+    action: (eventId: string, event: Event) => Promise<T>,
+  ): Promise<T | WhatsappReply> {
     if (!ctx.currentEventId) {
-      return textReply('No tenes un evento activo. Envia "mis eventos" para elegir uno.');
+      return textReply('No tienes un evento activo. Envia "mis eventos" para elegir uno.');
     }
 
     let event: Event;
@@ -481,7 +728,7 @@ export class WhatsappService {
       event = await this.userEventsService.findOne(ctx.currentEventId, ctx.userId);
     } catch (err) {
       if (err instanceof NotFoundException) {
-        return textReply('No tenes acceso a ese evento.');
+        return textReply('No tienes acceso a ese evento.');
       }
       throw err;
     }
@@ -493,7 +740,7 @@ export class WhatsappService {
     // Reply buttons are capped at 3: the two most common actions get a direct
     // button, and "Mas opciones" (id must match the parser's MENU_MORE) opens
     // the full list. Button ids must be parser-recognized or the button is dead.
-    return buttonsReply('Menu principal. Que queres hacer?', [
+    return buttonsReply('Menu principal. Que te gustaria hacer?', [
       { id: 'list_events', title: 'Mis eventos' },
       { id: 'add_guest', title: 'Agregar invitado' },
       { id: 'menu_more', title: 'Mas opciones' },
@@ -520,7 +767,7 @@ export class WhatsappService {
    */
   private buildEventsListReply(events: Pick<Event, 'id' | 'name'>[]): WhatsappReply {
     if (events.length === 0) {
-      return textReply('No tenes eventos asociados todavia.');
+      return textReply('No tienes eventos asociados todavia.');
     }
     // WhatsApp interactive lists allow at most 10 rows — cap here and tell the
     // user how to reach the rest instead of letting the API reject the message.

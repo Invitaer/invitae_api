@@ -364,3 +364,46 @@ describe('flow.machine', () => {
     });
   });
 });
+
+describe('user-facing wording — neutral tuteo, no voseo', () => {
+  // The module deliberately writes Spanish WITHOUT accents/tildes; these
+  // assertions pin the tuteo verb forms, not the accentuation.
+  const VOSEO_FORMS = /\b(podes|tenes|queres|volve|elegi|envia?nos|anda)\b/i;
+
+  it('rejects an invalid phone with "puedes", not "podes"', () => {
+    const pending: AddGuestFlowState = {
+      flow: 'AGREGAR',
+      step: 'ASK_PHONE',
+      data: { name: 'Juan Perez' },
+    };
+    const result = expectStatus(advanceFlow(pending, { type: 'INPUT', value: 'abc' }), 'INVALID');
+
+    expect(result.message).toContain('puedes incluir +');
+    expect(result.message).not.toMatch(VOSEO_FORMS);
+  });
+
+  it('rejects an invalid edit field with "Elige", not "Elegi"', () => {
+    const pending: EditGuestFlowState = {
+      flow: 'EDITAR',
+      step: 'PICK_FIELD',
+      guestId: 'g-1',
+    };
+    const result = expectStatus(advanceFlow(pending, { type: 'INPUT', value: 'zzz' }), 'INVALID');
+
+    expect(result.message).toContain('Elige:');
+    expect(result.message).not.toMatch(VOSEO_FORMS);
+  });
+
+  it('rejects an invalid phone on the EDIT flow with "puedes" too', () => {
+    const pending: EditGuestFlowState = {
+      flow: 'EDITAR',
+      step: 'ASK_VALUE',
+      guestId: 'g-1',
+      field: 'phone',
+    };
+    const result = expectStatus(advanceFlow(pending, { type: 'INPUT', value: 'abc' }), 'INVALID');
+
+    expect(result.message).toContain('puedes incluir +');
+    expect(result.message).not.toMatch(VOSEO_FORMS);
+  });
+});
