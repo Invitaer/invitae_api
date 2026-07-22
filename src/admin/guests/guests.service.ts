@@ -111,6 +111,23 @@ export class GuestsService {
     return rows.map((r) => r.id);
   }
 
+  /**
+   * Looks up a guest by id ALONE, with no event scoping. Used by the guest
+   * WhatsApp RSVP inbound guard (`WhatsappService.handleGuestRsvpTap`),
+   * which authenticates the write via the unguessable guestId embedded in
+   * the button id rather than through admin/user event membership — the
+   * eventId is not yet known at that point in the pipeline (it runs BEFORE
+   * `resolvePhone`). See `sdd/guest-whatsapp-notify/design` decision D4.
+   */
+  async findByIdUnscoped(id: string): Promise<Guest | undefined> {
+    const [guest] = await this.databaseService.db
+      .select()
+      .from(guests)
+      .where(eq(guests.id, id));
+
+    return guest;
+  }
+
   async findOne(eventId: string, id: string): Promise<GuestWithPhones> {
     const [guest] = await this.databaseService.db
       .select()
