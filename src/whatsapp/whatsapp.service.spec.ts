@@ -16,9 +16,14 @@ jest.mock('./whatsapp.client');
 jest.mock('../user/events/user-events.service');
 jest.mock('../admin/guests/guests.service');
 
-import { NotFoundException } from '@nestjs/common';
+import { Logger, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { WhatsappService } from './whatsapp.service';
+import {
+  EVENT_CONFIRM_STALE_MS,
+  WhatsappService,
+  extractInteractiveId,
+} from './whatsapp.service';
+import { parseCommand } from './command.parser';
 import { RedisService } from '../redis/redis.service';
 import { WhatsappLinkService } from './whatsapp-link.service';
 import { ConversationStore } from './conversation.store';
@@ -87,10 +92,39 @@ function mockRedisSetNX(
   );
 }
 
+describe('extractInteractiveId', () => {
+  it('reads interactive.button_reply.id when the inbound shape is type:"interactive"', () => {
+    expect(
+      extractInteractiveId({
+        id: 'm1',
+        from: '+5491100000000',
+        type: 'interactive',
+        interactive: { button_reply: { id: 'guest_rsvp_yes:abc', title: 'Si' } },
+      }),
+    ).toBe('guest_rsvp_yes:abc');
+  });
+
+  it('reads button.payload when the inbound shape is type:"button" (template quick-reply)', () => {
+    expect(
+      extractInteractiveId({
+        id: 'm2',
+        from: '+5491100000000',
+        type: 'button',
+        button: { payload: 'guest_rsvp_no:abc', text: 'No' },
+      }),
+    ).toBe('guest_rsvp_no:abc');
+  });
+
+  it('returns undefined when neither interactive nor button is present', () => {
+    expect(extractInteractiveId({ id: 'm3', from: '+5491100000000' })).toBeUndefined();
+  });
+});
+
 describe('WhatsappService', () => {
   let service: WhatsappService;
   let redisServiceMock: { setNX: jest.Mock; del: jest.Mock; delIfEquals: jest.Mock };
   let delaySpy: jest.SpyInstance;
+  let loggerErrorSpy: jest.SpyInstance;
   let whatsappLinkServiceMock: {
     verifyAndLink: jest.Mock;
     resolvePhone: jest.Mock;
@@ -107,6 +141,7 @@ describe('WhatsappService', () => {
     findAllPaginated: jest.Mock;
     create: jest.Mock;
     update: jest.Mock;
+    findByIdUnscoped: jest.Mock;
   };
 
   const USER_ID = 'user-uuid-1';
@@ -133,6 +168,7 @@ describe('WhatsappService', () => {
       findAllPaginated: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
+      findByIdUnscoped: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -154,6 +190,12 @@ describe('WhatsappService', () => {
     delaySpy = jest
       .spyOn(service as unknown as { delay: (ms: number) => Promise<void> }, 'delay')
       .mockResolvedValue(undefined);
+
+    // Best-effort Redis writes log through the service's own Logger. Silence
+    // it (and make it assertable) instead of polluting the test output.
+    loggerErrorSpy = jest
+      .spyOn((service as unknown as { logger: Logger }).logger, 'error')
+      .mockImplementation(() => undefined);
 
     // Default: sender is linked, unless a test overrides it
     whatsappLinkServiceMock.resolvePhone.mockResolvedValue(USER_ID);
@@ -248,6 +290,48 @@ describe('WhatsappService', () => {
     });
   });
 
+  describe('unlinked onboarding replies (mute-gap fix)', () => {
+    beforeEach(() => {
+      mockRedisSetNX(redisServiceMock.setNX);
+      whatsappLinkServiceMock.resolvePhone.mockResolvedValue(null); // unlinked
+    });
+
+    it('replies with linking instructions when an unlinked phone sends a non-PIN message', async () => {
+      await service.handleIncoming(buildPayload('m-unlinked-hello', '+5491199999999', 'hola'));
+
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        '+5491199999999',
+        expect.stringContaining('PIN'),
+      );
+      // Still no dispatch — an unlinked phone never resolves a conversation.
+      expect(conversationStoreMock.get).not.toHaveBeenCalled();
+    });
+
+    it('confirms the link when an unlinked phone sends a VALID PIN', async () => {
+      whatsappLinkServiceMock.verifyAndLink.mockResolvedValue(true);
+
+      await service.handleIncoming(buildPayload('m-pin-ok', PHONE, '123456'));
+
+      expect(whatsappLinkServiceMock.verifyAndLink).toHaveBeenCalledWith('123456', PHONE);
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        PHONE,
+        expect.stringContaining('vinculado'),
+      );
+    });
+
+    it('tells the user to retry when an unlinked phone sends an INVALID/expired PIN', async () => {
+      whatsappLinkServiceMock.verifyAndLink.mockResolvedValue(false);
+
+      await service.handleIncoming(buildPayload('m-pin-bad', PHONE, '000000'));
+
+      expect(whatsappLinkServiceMock.verifyAndLink).toHaveBeenCalledWith('000000', PHONE);
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        PHONE,
+        expect.stringContaining('no es valido'),
+      );
+    });
+  });
+
   describe('per-user concurrency lock (F4)', () => {
     it('BLOCKER — never drops the message on lock contention: retries with backoff, then processes best-effort', async () => {
       // Lock is never acquirable (all attempts fail). Because Meta will not
@@ -266,7 +350,7 @@ describe('WhatsappService', () => {
         expect.any(Number),
       );
       expect(whatsappLinkServiceMock.resolvePhone).toHaveBeenCalledWith(PHONE);
-      expect(whatsappClientMock.sendText).toHaveBeenCalled();
+      expect(whatsappClientMock.sendInteractiveButtons).toHaveBeenCalled();
       // ...and never released a lock it does not hold.
       expect(redisServiceMock.delIfEquals).not.toHaveBeenCalled();
     });
@@ -287,7 +371,7 @@ describe('WhatsappService', () => {
 
       expect(lockAttempts).toBe(3);
       expect(delaySpy).toHaveBeenCalledTimes(2);
-      expect(whatsappClientMock.sendText).toHaveBeenCalled();
+      expect(whatsappClientMock.sendInteractiveButtons).toHaveBeenCalled();
       // Acquired -> released via compare-and-delete with its own token.
       expect(redisServiceMock.delIfEquals).toHaveBeenCalledWith(
         `wa:lock:${PHONE}`,
@@ -313,14 +397,48 @@ describe('WhatsappService', () => {
       mockRedisSetNX(redisServiceMock.setNX);
     });
 
-    it('replies to "menu" without touching UserEventsService/GuestsService', async () => {
+    it('replies to "menu" with 3 interactive BUTTONS (not text/list) and without touching UserEventsService/GuestsService', async () => {
       conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
 
       await service.handleIncoming(buildPayload('m-menu', PHONE, 'menu'));
 
-      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(PHONE, expect.any(String));
+      expect(whatsappClientMock.sendInteractiveButtons).toHaveBeenCalled();
+      expect(whatsappClientMock.sendText).not.toHaveBeenCalled();
+      expect(whatsappClientMock.sendInteractiveList).not.toHaveBeenCalled();
       expect(userEventsServiceMock.findOne).not.toHaveBeenCalled();
       expect(guestsServiceMock.findAll).not.toHaveBeenCalled();
+    });
+
+    it('ROUND-TRIP: every "menu" button id is recognized by the parser and fits WhatsApp limits (max 3 buttons, 20-char titles)', async () => {
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
+
+      await service.handleIncoming(buildPayload('m-menu-rt', PHONE, 'menu'));
+
+      const [, , buttons] = whatsappClientMock.sendInteractiveButtons.mock.calls[0];
+      expect(buttons.length).toBeGreaterThan(0);
+      expect(buttons.length).toBeLessThanOrEqual(3); // WhatsApp reply-button cap
+      for (const button of buttons) {
+        // The exact id the bot SENDS must parse back to a real command.
+        expect(parseCommand({ interactiveId: button.id }).kind).not.toBe('UNKNOWN');
+        expect(button.title.length).toBeLessThanOrEqual(20); // WhatsApp button-title cap
+      }
+    });
+
+    it('"Mas opciones" (menu_more) opens an interactive LIST whose row ids the parser recognizes and fits WhatsApp limits', async () => {
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-menu-more', PHONE, 'menu_more', 'button_reply'),
+      );
+
+      expect(whatsappClientMock.sendInteractiveList).toHaveBeenCalled();
+      const [, , , rows] = whatsappClientMock.sendInteractiveList.mock.calls[0];
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.length).toBeLessThanOrEqual(10); // WhatsApp list cap
+      for (const row of rows) {
+        expect(parseCommand({ interactiveId: row.id }).kind).not.toBe('UNKNOWN');
+        expect(row.title.length).toBeLessThanOrEqual(24); // WhatsApp row-title cap
+      }
     });
 
     it('"mis eventos" SENDS an interactive LIST (not text) whose rows are "select_event:{id}"', async () => {
@@ -377,7 +495,7 @@ describe('WhatsappService', () => {
 
       expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
         PHONE,
-        'No tenes eventos asociados todavia.',
+        'No tienes eventos asociados todavia.',
       );
       expect(whatsappClientMock.sendInteractiveList).not.toHaveBeenCalled();
     });
@@ -415,7 +533,7 @@ describe('WhatsappService', () => {
       expect(whatsappClientMock.sendText).toHaveBeenCalledWith(PHONE, expect.any(String));
     });
 
-    it('"cancelar" clears the conversation context', async () => {
+    it('"cancelar" drops the pending flow but PRESERVES the active event (never wipes the whole context)', async () => {
       conversationStoreMock.get.mockResolvedValue({
         userId: USER_ID,
         currentEventId: EVENT_ID,
@@ -424,7 +542,11 @@ describe('WhatsappService', () => {
 
       await service.handleIncoming(buildPayload('m-cancel', PHONE, 'cancelar'));
 
-      expect(conversationStoreMock.clear).toHaveBeenCalledWith(PHONE);
+      expect(conversationStoreMock.clear).not.toHaveBeenCalled();
+      expect(conversationStoreMock.set).toHaveBeenCalledWith(PHONE, {
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+      });
       expect(whatsappClientMock.sendText).toHaveBeenCalledWith(PHONE, expect.any(String));
     });
   });
@@ -482,6 +604,10 @@ describe('WhatsappService', () => {
     });
 
     it('CRITICAL — non-member with a currentEventId in ctx is denied and GuestsService is NEVER called (cross-org leak prevention)', async () => {
+      // The stored context must belong to the phone's CURRENT owner, otherwise
+      // it is discarded outright (see the re-link guard) and this path would
+      // never be reached.
+      whatsappLinkServiceMock.resolvePhone.mockResolvedValue('attacker-uuid');
       conversationStoreMock.get.mockResolvedValue({
         userId: 'attacker-uuid',
         currentEventId: EVENT_ID, // somehow present in Redis ctx, must NOT be trusted
@@ -735,7 +861,12 @@ describe('WhatsappService', () => {
         tickets: 2,
         email: 'juan@example.com',
       });
-      expect(conversationStoreMock.clear).toHaveBeenCalledWith(PHONE);
+      // The flow is dropped, but the active event survives the completion.
+      expect(conversationStoreMock.clear).not.toHaveBeenCalled();
+      expect(conversationStoreMock.set).toHaveBeenLastCalledWith(PHONE, {
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+      });
     });
 
     it('F3 — when GuestsService.create rejects, the flow is cleared and an error text is sent (no throw, no stuck CONFIRM)', async () => {
@@ -755,14 +886,17 @@ describe('WhatsappService', () => {
       ).resolves.toBeUndefined();
 
       expect(guestsServiceMock.create).toHaveBeenCalled();
-      expect(conversationStoreMock.clear).toHaveBeenCalledWith(PHONE);
+      expect(conversationStoreMock.set).toHaveBeenLastCalledWith(PHONE, {
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+      });
       expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
         PHONE,
         expect.stringContaining('No pude guardar'),
       );
     });
 
-    it('FIX C — when the write SUCCEEDS but clearing the conversation throws, the user still gets the SUCCESS reply (no false failure -> no duplicate retry)', async () => {
+    it('FIX C — when the write SUCCEEDS but persisting the cleared conversation throws, the user still gets the SUCCESS reply (no false failure -> no duplicate retry)', async () => {
       conversationStoreMock.get.mockResolvedValue({
         userId: USER_ID,
         currentEventId: EVENT_ID,
@@ -773,9 +907,10 @@ describe('WhatsappService', () => {
         },
       });
       guestsServiceMock.create.mockResolvedValue({ id: 'guest-new' });
-      // The write already committed — a clear() failure must NOT be reported as
-      // a write failure, or the user would retry and duplicate the guest.
-      conversationStoreMock.clear.mockRejectedValue(new Error('redis down'));
+      // The write already committed — a failure persisting the cleared context
+      // must NOT be reported as a write failure, or the user would retry and
+      // duplicate the guest.
+      conversationStoreMock.set.mockRejectedValue(new Error('redis down'));
 
       await expect(
         service.handleIncoming(buildInteractivePayload('m-agregar-clearfail', PHONE, 'confirm')),
@@ -839,7 +974,11 @@ describe('WhatsappService', () => {
       expect(guestsServiceMock.update).toHaveBeenCalledWith(EVENT_ID, 'guest-uuid-9', {
         phone: '+5491199998888',
       });
-      expect(conversationStoreMock.clear).toHaveBeenCalledWith(PHONE);
+      expect(conversationStoreMock.clear).not.toHaveBeenCalled();
+      expect(conversationStoreMock.set).toHaveBeenLastCalledWith(PHONE, {
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+      });
     });
 
     it('reaching the CONFIRM step without tapping confirm does NOT call GuestsService.update', async () => {
@@ -897,6 +1036,7 @@ describe('WhatsappService', () => {
     });
 
     it('CRITICAL — a non-member tapping confirmar is denied and GuestsService.update is NEVER called', async () => {
+      whatsappLinkServiceMock.resolvePhone.mockResolvedValue('attacker-uuid');
       conversationStoreMock.get.mockResolvedValue({
         userId: 'attacker-uuid',
         currentEventId: EVENT_ID,
@@ -910,6 +1050,706 @@ describe('WhatsappService', () => {
       );
 
       expect(guestsServiceMock.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('user-facing wording — neutral tuteo, no voseo', () => {
+    const VOSEO_FORMS = /\b(podes|tenes|queres|volve|elegi)\b/i;
+
+    beforeEach(() => {
+      mockRedisSetNX(redisServiceMock.setNX);
+    });
+
+    it('uses "vuelve" when an OTP is invalid', async () => {
+      whatsappLinkServiceMock.resolvePhone.mockResolvedValue(null);
+      whatsappLinkServiceMock.verifyAndLink.mockResolvedValue(false);
+
+      await service.handleIncoming(buildPayload('m-voseo-otp', PHONE, '000000'));
+
+      const [, message] = whatsappClientMock.sendText.mock.calls[0];
+      expect(message).toContain('vuelve a enviarlo');
+      expect(message).not.toMatch(VOSEO_FORMS);
+    });
+
+    it('uses "quieres" when asking which field to edit', async () => {
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID, currentEventId: EVENT_ID });
+      userEventsServiceMock.findOne.mockResolvedValue({ id: EVENT_ID, name: 'My Wedding' });
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-voseo-edit', PHONE, 'edit_guest:guest-uuid-9'),
+      );
+
+      const [, message] = whatsappClientMock.sendText.mock.calls[0];
+      expect(message).toContain('Que campo quieres editar?');
+      expect(message).not.toMatch(VOSEO_FORMS);
+    });
+
+    it('uses "Vuelve a intentarlo" when the guest write fails', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        pendingAction: {
+          flow: 'AGREGAR',
+          step: 'CONFIRM',
+          data: { name: 'Juan Perez', phone: '+5491122334455', tickets: 2 },
+        },
+      });
+      userEventsServiceMock.findOne.mockResolvedValue({ id: EVENT_ID, name: 'My Wedding' });
+      guestsServiceMock.create.mockRejectedValue(new Error('db unavailable'));
+
+      await service.handleIncoming(buildInteractivePayload('m-voseo-write', PHONE, 'confirm'));
+
+      const [, message] = whatsappClientMock.sendText.mock.calls[0];
+      expect(message).toContain('Vuelve a intentarlo');
+      expect(message).not.toMatch(VOSEO_FORMS);
+    });
+
+    it('uses "No tienes acceso" when the user is not a member of the selected event', async () => {
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
+      userEventsServiceMock.findOne.mockRejectedValue(new NotFoundException('nope'));
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-voseo-access', PHONE, `select_event:${EVENT_ID}`),
+      );
+
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        PHONE,
+        'No tienes acceso a ese evento.',
+      );
+    });
+
+    it('uses "No tienes un evento activo" when no event is selected', async () => {
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
+
+      await service.handleIncoming(buildPayload('m-voseo-noevent', PHONE, 'resumen'));
+
+      const [, message] = whatsappClientMock.sendText.mock.calls[0];
+      expect(message).toContain('No tienes un evento activo');
+      expect(message).not.toMatch(VOSEO_FORMS);
+    });
+  });
+
+  describe('free-text confirmation must not hijack a flow INPUT step', () => {
+    beforeEach(() => {
+      mockRedisSetNX(redisServiceMock.setNX);
+      userEventsServiceMock.findOne.mockResolvedValue({ id: EVENT_ID, name: 'My Wedding' });
+    });
+
+    it('CRITICAL — a guest named "Si" is captured as the NAME, never treated as a confirmation', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        pendingAction: { flow: 'AGREGAR', step: 'ASK_NAME', data: {} },
+      });
+
+      await service.handleIncoming(buildPayload('m-name-si', PHONE, 'Si'));
+
+      expect(conversationStoreMock.set).toHaveBeenCalledWith(
+        PHONE,
+        expect.objectContaining({
+          pendingAction: expect.objectContaining({
+            step: 'ASK_PHONE',
+            data: expect.objectContaining({ name: 'Si' }),
+          }),
+        }),
+      );
+      expect(guestsServiceMock.create).not.toHaveBeenCalled();
+    });
+
+    it('a typed "ok" during an INPUT step is captured as input, not a premature CONFIRM', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        pendingAction: {
+          flow: 'EDITAR',
+          step: 'ASK_VALUE',
+          guestId: 'guest-uuid-9',
+          field: 'name',
+        },
+      });
+
+      await service.handleIncoming(buildPayload('m-value-ok', PHONE, 'ok'));
+
+      expect(guestsServiceMock.update).not.toHaveBeenCalled();
+      expect(conversationStoreMock.set).toHaveBeenCalledWith(
+        PHONE,
+        expect.objectContaining({
+          pendingAction: expect.objectContaining({ step: 'CONFIRM', value: 'ok' }),
+        }),
+      );
+    });
+
+    it('a typed "confirmar" AT the CONFIRM step still completes the write', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        pendingAction: {
+          flow: 'AGREGAR',
+          step: 'CONFIRM',
+          data: { name: 'Juan Perez', phone: '+5491122334455', tickets: 2 },
+        },
+      });
+
+      await service.handleIncoming(buildPayload('m-text-confirm', PHONE, 'confirmar'));
+
+      expect(guestsServiceMock.create).toHaveBeenCalledWith(
+        EVENT_ID,
+        expect.objectContaining({ name: 'Juan Perez' }),
+      );
+    });
+  });
+
+  describe('active-event re-confirmation after inactivity', () => {
+    const NOW = new Date('2026-07-19T12:00:00.000Z').getTime();
+    // Imported from the service — a local copy would silently drift if the
+    // production window ever changed.
+    const STALE_MS = EVENT_CONFIRM_STALE_MS;
+
+    beforeEach(() => {
+      mockRedisSetNX(redisServiceMock.setNX);
+      userEventsServiceMock.findOne.mockResolvedValue({ id: EVENT_ID, name: 'My Wedding' });
+      jest.useFakeTimers().setSystemTime(NOW);
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    function staleCtx(extra: Record<string, unknown> = {}) {
+      return {
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        lastInteractionAt: NOW - STALE_MS - 1000,
+        ...extra,
+      };
+    }
+
+    it('asks to re-confirm the event (with real event name + buttons) when an event-scoped command arrives after the stale window', async () => {
+      conversationStoreMock.get.mockResolvedValue(staleCtx());
+
+      await service.handleIncoming(buildPayload('m-stale', PHONE, 'resumen'));
+
+      // Membership is still validated — the name comes from UserEventsService.
+      expect(userEventsServiceMock.findOne).toHaveBeenCalledWith(EVENT_ID, USER_ID);
+      expect(whatsappClientMock.sendInteractiveButtons).toHaveBeenCalledWith(
+        PHONE,
+        'Paso un rato desde tu ultimo mensaje. Seguimos trabajando en "My Wedding"?',
+        [
+          { id: 'resume_event', title: 'Si, continuar' },
+          { id: 'list_events', title: 'Elegir otro evento' },
+        ],
+      );
+      // The original request is parked, not executed.
+      expect(guestsServiceMock.findAll).not.toHaveBeenCalled();
+      expect(conversationStoreMock.set).toHaveBeenCalledWith(
+        PHONE,
+        expect.objectContaining({ pendingIntent: { kind: 'RSVP_SUMMARY' } }),
+      );
+    });
+
+    it('does NOT fire when the context is fresh', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        lastInteractionAt: NOW - 1000,
+      });
+      guestsServiceMock.findAll.mockResolvedValue([]);
+
+      await service.handleIncoming(buildPayload('m-fresh', PHONE, 'resumen'));
+
+      expect(guestsServiceMock.findAll).toHaveBeenCalledWith(EVENT_ID);
+      expect(whatsappClientMock.sendInteractiveButtons).not.toHaveBeenCalled();
+    });
+
+    it('does NOT fire when lastInteractionAt is absent (legacy context)', async () => {
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID, currentEventId: EVENT_ID });
+      guestsServiceMock.findAll.mockResolvedValue([]);
+
+      await service.handleIncoming(buildPayload('m-legacy', PHONE, 'resumen'));
+
+      expect(guestsServiceMock.findAll).toHaveBeenCalledWith(EVENT_ID);
+    });
+
+    it('NEVER interrupts an in-progress write flow, however stale', async () => {
+      conversationStoreMock.get.mockResolvedValue(
+        staleCtx({ pendingAction: { flow: 'AGREGAR', step: 'ASK_NAME', data: {} } }),
+      );
+
+      await service.handleIncoming(buildPayload('m-stale-inflow', PHONE, 'Juan Perez'));
+
+      expect(whatsappClientMock.sendInteractiveButtons).not.toHaveBeenCalled();
+      expect(conversationStoreMock.set).toHaveBeenCalledWith(
+        PHONE,
+        expect.objectContaining({
+          pendingAction: expect.objectContaining({ step: 'ASK_PHONE' }),
+        }),
+      );
+    });
+
+    it.each(['menu', 'mas opciones', 'mis eventos', 'cancelar', 'continuar'])(
+      'never fires for the non-event-scoped command %j',
+      async (text) => {
+        conversationStoreMock.get.mockResolvedValue(staleCtx());
+
+        await service.handleIncoming(buildPayload(`m-stale-${text}`, PHONE, text));
+
+        expect(whatsappClientMock.sendInteractiveButtons).not.toHaveBeenCalledWith(
+          PHONE,
+          expect.stringContaining('Seguimos trabajando'),
+          expect.anything(),
+        );
+      },
+    );
+
+    it('never fires for an unrecognized command', async () => {
+      conversationStoreMock.get.mockResolvedValue(staleCtx());
+
+      await service.handleIncoming(buildPayload('m-stale-unknown', PHONE, 'blah blah'));
+
+      expect(whatsappClientMock.sendInteractiveButtons).not.toHaveBeenCalled();
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        PHONE,
+        expect.stringContaining('No entendi'),
+      );
+    });
+
+    it('RESUME_EVENT replays the parked intent so the user never has to retype it', async () => {
+      conversationStoreMock.get.mockResolvedValue(
+        staleCtx({ pendingIntent: { kind: 'RSVP_SUMMARY' } }),
+      );
+      guestsServiceMock.findAll.mockResolvedValue([
+        { id: 'g1', name: 'A', rsvpStatus: 'ACCEPTED', tickets: 2 },
+      ]);
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-resume', PHONE, 'resume_event', 'button_reply'),
+      );
+
+      expect(guestsServiceMock.findAll).toHaveBeenCalledWith(EVENT_ID);
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        PHONE,
+        expect.stringContaining('Resumen:'),
+      );
+      // The parked intent is popped — a second resume must not replay it.
+      expect(conversationStoreMock.set).toHaveBeenCalledWith(PHONE, {
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        lastInteractionAt: expect.any(Number),
+      });
+    });
+
+    it('RESUME_EVENT with nothing parked falls back to the menu', async () => {
+      conversationStoreMock.get.mockResolvedValue(staleCtx());
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-resume-empty', PHONE, 'resume_event', 'button_reply'),
+      );
+
+      expect(whatsappClientMock.sendInteractiveButtons).toHaveBeenCalledWith(
+        PHONE,
+        expect.stringContaining('Menu principal'),
+        expect.anything(),
+      );
+    });
+
+    it('selecting a DIFFERENT event drops the stale parked intent', async () => {
+      conversationStoreMock.get.mockResolvedValue(
+        staleCtx({ pendingIntent: { kind: 'RSVP_SUMMARY' } }),
+      );
+      userEventsServiceMock.findOne.mockResolvedValue({ id: 'other-event', name: 'Other' });
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-switch', PHONE, 'select_event:other-event'),
+      );
+
+      const [, persisted] = conversationStoreMock.set.mock.calls[0];
+      expect(persisted.currentEventId).toBe('other-event');
+      expect(persisted).not.toHaveProperty('pendingIntent');
+    });
+
+    it('cancelling an add-guest flow keeps the active event usable for the next command', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        lastInteractionAt: NOW,
+        pendingAction: { flow: 'AGREGAR', step: 'ASK_PHONE', data: { name: 'Juan' } },
+      });
+
+      await service.handleIncoming(buildPayload('m-cancel-flow', PHONE, 'cancelar'));
+
+      const [, afterCancel] = conversationStoreMock.set.mock.calls[0];
+      expect(afterCancel).toEqual({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        lastInteractionAt: NOW,
+      });
+      expect(afterCancel).not.toHaveProperty('pendingAction');
+
+      // The very next command still resolves against the same event.
+      conversationStoreMock.get.mockResolvedValue({ ...afterCancel, lastInteractionAt: NOW });
+      guestsServiceMock.findAll.mockResolvedValue([]);
+
+      await service.handleIncoming(buildPayload('m-after-cancel', PHONE, 'resumen'));
+
+      expect(guestsServiceMock.findAll).toHaveBeenCalledWith(EVENT_ID);
+    });
+
+    it('FIX 4 — a parked intent does NOT survive a command that dispatched normally', async () => {
+      // 1. A stale event-scoped command parks the intent behind the gate.
+      conversationStoreMock.get.mockResolvedValue(staleCtx());
+      await service.handleIncoming(buildPayload('m-park', PHONE, 'resumen'));
+      const [, parkedCtx] = conversationStoreMock.set.mock.calls[0];
+      expect(parkedCtx).toEqual(
+        expect.objectContaining({ pendingIntent: { kind: 'RSVP_SUMMARY' } }),
+      );
+
+      // 2. The user ignores the question and sends a fresh command instead,
+      //    which dispatches normally — the parked intent is now obsolete.
+      conversationStoreMock.get.mockResolvedValue({ ...parkedCtx, lastInteractionAt: NOW });
+      guestsServiceMock.findAll.mockResolvedValue([]);
+      await service.handleIncoming(buildPayload('m-fresh-after-park', PHONE, 'resumen'));
+      const [, touchedCtx] = conversationStoreMock.set.mock.calls[1];
+      expect(touchedCtx).not.toHaveProperty('pendingIntent');
+
+      // 3. Scrolling up and tapping the old "Si, continuar" button must NOT
+      //    replay the long-dead intent.
+      conversationStoreMock.get.mockResolvedValue(touchedCtx);
+      whatsappClientMock.sendInteractiveButtons.mockClear();
+      await service.handleIncoming(
+        buildInteractivePayload('m-resume-dead', PHONE, 'resume_event', 'button_reply'),
+      );
+
+      expect(whatsappClientMock.sendInteractiveButtons).toHaveBeenCalledWith(
+        PHONE,
+        expect.stringContaining('Menu principal'),
+        expect.anything(),
+      );
+    });
+
+    it('FIX 3a — a failed parking write falls through to normal dispatch instead of 500ing', async () => {
+      conversationStoreMock.get.mockResolvedValue(staleCtx());
+      conversationStoreMock.set.mockRejectedValue(new Error('redis down'));
+      guestsServiceMock.findAll.mockResolvedValue([
+        { id: 'g1', name: 'A', rsvpStatus: 'ACCEPTED', tickets: 2 },
+      ]);
+
+      await expect(
+        service.handleIncoming(buildPayload('m-park-fail', PHONE, 'resumen')),
+      ).resolves.toBeUndefined();
+
+      // We never ask a question whose answer we cannot remember — the user's
+      // actual command is answered instead.
+      expect(guestsServiceMock.findAll).toHaveBeenCalledWith(EVENT_ID);
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        PHONE,
+        expect.stringContaining('Resumen:'),
+      );
+      expect(whatsappClientMock.sendInteractiveButtons).not.toHaveBeenCalled();
+      expect(loggerErrorSpy).toHaveBeenCalled();
+    });
+
+    it('FIX 3b — RESUME_EVENT still replays the parked intent when persisting the pop fails', async () => {
+      conversationStoreMock.get.mockResolvedValue(
+        staleCtx({ pendingIntent: { kind: 'RSVP_SUMMARY' } }),
+      );
+      conversationStoreMock.set.mockRejectedValue(new Error('redis down'));
+      guestsServiceMock.findAll.mockResolvedValue([
+        { id: 'g1', name: 'A', rsvpStatus: 'ACCEPTED', tickets: 2 },
+      ]);
+
+      await expect(
+        service.handleIncoming(
+          buildInteractivePayload('m-resume-persistfail', PHONE, 'resume_event', 'button_reply'),
+        ),
+      ).resolves.toBeUndefined();
+
+      expect(guestsServiceMock.findAll).toHaveBeenCalledWith(EVENT_ID);
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        PHONE,
+        expect.stringContaining('Resumen:'),
+      );
+      expect(loggerErrorSpy).toHaveBeenCalled();
+    });
+  });
+
+  describe('FIX 1 — a re-linked phone never inherits the previous owner identity', () => {
+    const PREVIOUS_OWNER = 'previous-owner-uuid';
+
+    beforeEach(() => {
+      mockRedisSetNX(redisServiceMock.setNX);
+      userEventsServiceMock.findOne.mockResolvedValue({
+        id: EVENT_ID,
+        name: 'Boda del dueno anterior',
+      });
+    });
+
+    it('CRITICAL — does NOT reuse the previous owner currentEventId for an event-scoped command', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: PREVIOUS_OWNER,
+        currentEventId: EVENT_ID,
+      });
+
+      await service.handleIncoming(buildPayload('m-relink-scoped', PHONE, 'resumen'));
+
+      expect(userEventsServiceMock.findOne).not.toHaveBeenCalled();
+      expect(guestsServiceMock.findAll).not.toHaveBeenCalled();
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        PHONE,
+        expect.stringContaining('No tienes un evento activo'),
+      );
+    });
+
+    it('CRITICAL — does NOT resume the previous owner pendingAction', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: PREVIOUS_OWNER,
+        currentEventId: EVENT_ID,
+        pendingAction: { flow: 'AGREGAR', step: 'ASK_NAME', data: {} },
+      });
+
+      await service.handleIncoming(buildPayload('m-relink-flow', PHONE, 'Juan Perez'));
+
+      expect(guestsServiceMock.create).not.toHaveBeenCalled();
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        PHONE,
+        expect.stringContaining('No entendi'),
+      );
+    });
+
+    it('CRITICAL — the re-confirmation gate never discloses the previous owner event name', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: PREVIOUS_OWNER,
+        currentEventId: EVENT_ID,
+        lastInteractionAt: Date.now() - EVENT_CONFIRM_STALE_MS - 1000,
+      });
+
+      await service.handleIncoming(buildPayload('m-relink-stale', PHONE, 'resumen'));
+
+      expect(whatsappClientMock.sendInteractiveButtons).not.toHaveBeenCalled();
+      const sentBodies = whatsappClientMock.sendText.mock.calls.map(([, body]) => body);
+      for (const body of sentBodies) {
+        expect(body).not.toContain('Boda del dueno anterior');
+      }
+    });
+
+    it('drops the stale Redis key so the previous owner state cannot linger', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: PREVIOUS_OWNER,
+        currentEventId: EVENT_ID,
+      });
+
+      await service.handleIncoming(buildPayload('m-relink-clear', PHONE, 'menu'));
+
+      expect(conversationStoreMock.clear).toHaveBeenCalledWith(PHONE);
+    });
+
+    it('a MATCHING stored userId is still reused (the guard must not wipe normal contexts)', async () => {
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+      });
+      guestsServiceMock.findAll.mockResolvedValue([]);
+
+      await service.handleIncoming(buildPayload('m-same-owner', PHONE, 'resumen'));
+
+      expect(conversationStoreMock.clear).not.toHaveBeenCalled();
+      expect(guestsServiceMock.findAll).toHaveBeenCalledWith(EVENT_ID);
+    });
+  });
+
+  describe('FIX 2 — recognized commands never hijack an active write flow', () => {
+    beforeEach(() => {
+      mockRedisSetNX(redisServiceMock.setNX);
+      userEventsServiceMock.findOne.mockResolvedValue({ id: EVENT_ID, name: 'My Wedding' });
+      conversationStoreMock.get.mockResolvedValue({
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+        pendingAction: { flow: 'AGREGAR', step: 'ASK_NAME', data: {} },
+      });
+    });
+
+    it.each(['Resumen', 'info', 'eventos', 'Confirmados', 'totales'])(
+      'CRITICAL — %j typed at the ASK_NAME step is captured as the guest name, not dispatched',
+      async (input) => {
+        await service.handleIncoming(buildPayload(`m-flow-${input}`, PHONE, input));
+
+        expect(conversationStoreMock.set).toHaveBeenCalledWith(
+          PHONE,
+          expect.objectContaining({
+            pendingAction: expect.objectContaining({
+              step: 'ASK_PHONE',
+              data: expect.objectContaining({ name: input }),
+            }),
+          }),
+        );
+        expect(guestsServiceMock.findAll).not.toHaveBeenCalled();
+        expect(userEventsServiceMock.findByUser).not.toHaveBeenCalled();
+      },
+    );
+
+    it('"cancelar" still escapes the flow', async () => {
+      await service.handleIncoming(buildPayload('m-flow-cancelar', PHONE, 'cancelar'));
+
+      expect(conversationStoreMock.set).toHaveBeenCalledWith(PHONE, {
+        userId: USER_ID,
+        currentEventId: EVENT_ID,
+      });
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(PHONE, 'Operacion cancelada.');
+    });
+
+    it('"menu" still escapes the flow', async () => {
+      await service.handleIncoming(buildPayload('m-flow-menu', PHONE, 'menu'));
+
+      expect(whatsappClientMock.sendInteractiveButtons).toHaveBeenCalledWith(
+        PHONE,
+        expect.stringContaining('Menu principal'),
+        expect.anything(),
+      );
+    });
+  });
+
+  describe('guest RSVP inbound guard', () => {
+    const GUEST_ID = '11111111-1111-4111-8111-111111111111';
+    const GUEST_PHONE = '+5491100005555';
+
+    beforeEach(() => {
+      mockRedisSetNX(redisServiceMock.setNX);
+    });
+
+    it('an interactive button tap (guest_rsvp_yes) sets ACCEPTED, replies, and NEVER resolves the phone', async () => {
+      guestsServiceMock.findByIdUnscoped.mockResolvedValue({
+        id: GUEST_ID,
+        eventId: EVENT_ID,
+        rsvpStatus: 'PENDING',
+      });
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-guest-yes', GUEST_PHONE, `guest_rsvp_yes:${GUEST_ID}`, 'button_reply'),
+      );
+
+      expect(guestsServiceMock.update).toHaveBeenCalledWith(EVENT_ID, GUEST_ID, {
+        rsvpStatus: 'ACCEPTED',
+      });
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(GUEST_PHONE, expect.any(String));
+      expect(whatsappLinkServiceMock.resolvePhone).not.toHaveBeenCalled();
+      expect(conversationStoreMock.get).not.toHaveBeenCalled();
+    });
+
+    it('a type:"button" tap (button.payload) sets DECLINED, identical to the interactive-shape path', async () => {
+      guestsServiceMock.findByIdUnscoped.mockResolvedValue({
+        id: GUEST_ID,
+        eventId: EVENT_ID,
+        rsvpStatus: 'PENDING',
+      });
+
+      const payload = {
+        entry: [
+          {
+            changes: [
+              {
+                value: {
+                  messages: [
+                    {
+                      id: 'm-guest-no-btn',
+                      from: GUEST_PHONE,
+                      type: 'button',
+                      button: { payload: `guest_rsvp_no:${GUEST_ID}`, text: 'No podre asistir' },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      await service.handleIncoming(payload);
+
+      expect(guestsServiceMock.update).toHaveBeenCalledWith(EVENT_ID, GUEST_ID, {
+        rsvpStatus: 'DECLINED',
+      });
+      expect(whatsappLinkServiceMock.resolvePhone).not.toHaveBeenCalled();
+    });
+
+    it('a tap OVERWRITES an organizer-set ACCEPTED status, with no lock or rejection', async () => {
+      guestsServiceMock.findByIdUnscoped.mockResolvedValue({
+        id: GUEST_ID,
+        eventId: EVENT_ID,
+        rsvpStatus: 'ACCEPTED', // set previously by an organizer via dashboard CRUD
+      });
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-guest-overwrite', GUEST_PHONE, `guest_rsvp_no:${GUEST_ID}`, 'button_reply'),
+      );
+
+      expect(guestsServiceMock.update).toHaveBeenCalledWith(EVENT_ID, GUEST_ID, {
+        rsvpStatus: 'DECLINED',
+      });
+    });
+
+    it('a repeat identical tap is a single idempotent write with a single reply', async () => {
+      guestsServiceMock.findByIdUnscoped.mockResolvedValue({
+        id: GUEST_ID,
+        eventId: EVENT_ID,
+        rsvpStatus: 'ACCEPTED', // already recorded from a prior tap
+      });
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-guest-repeat', GUEST_PHONE, `guest_rsvp_yes:${GUEST_ID}`, 'button_reply'),
+      );
+
+      expect(guestsServiceMock.update).toHaveBeenCalledTimes(1);
+      expect(whatsappClientMock.sendText).toHaveBeenCalledTimes(1);
+    });
+
+    it('a stale/unknown guestId replies neutrally without throwing or writing', async () => {
+      guestsServiceMock.findByIdUnscoped.mockResolvedValue(undefined);
+
+      await expect(
+        service.handleIncoming(
+          buildInteractivePayload('m-guest-gone', GUEST_PHONE, `guest_rsvp_yes:${GUEST_ID}`, 'button_reply'),
+        ),
+      ).resolves.toBeUndefined();
+
+      expect(guestsServiceMock.update).not.toHaveBeenCalled();
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        GUEST_PHONE,
+        expect.stringContaining('ya no esta disponible'),
+      );
+    });
+
+    it('a duplicate wamid (SETNX dedup already claimed) never reaches the guest guard', async () => {
+      mockRedisSetNX(redisServiceMock.setNX, { msgId: false });
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-guest-dup', GUEST_PHONE, `guest_rsvp_yes:${GUEST_ID}`, 'button_reply'),
+      );
+
+      expect(guestsServiceMock.findByIdUnscoped).not.toHaveBeenCalled();
+      expect(guestsServiceMock.update).not.toHaveBeenCalled();
+    });
+
+    it('an organizer "confirmar:{id}" tap still reaches resolvePhone unchanged (no namespace collision)', async () => {
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID, currentEventId: EVENT_ID });
+      userEventsServiceMock.findOne.mockResolvedValue({ id: EVENT_ID, name: 'My Wedding' });
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-organizer-confirmar', PHONE, 'confirmar:guest-uuid-9', 'button_reply'),
+      );
+
+      expect(whatsappLinkServiceMock.resolvePhone).toHaveBeenCalledWith(PHONE);
+      expect(guestsServiceMock.findByIdUnscoped).not.toHaveBeenCalled();
+      expect(guestsServiceMock.update).toHaveBeenCalledWith(EVENT_ID, 'guest-uuid-9', {
+        rsvpStatus: 'ACCEPTED',
+      });
+    });
+
+    it('plain organizer text still reaches resolvePhone unchanged (no namespace collision)', async () => {
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
+
+      await service.handleIncoming(buildPayload('m-organizer-text', PHONE, 'menu'));
+
+      expect(whatsappLinkServiceMock.resolvePhone).toHaveBeenCalledWith(PHONE);
+      expect(guestsServiceMock.findByIdUnscoped).not.toHaveBeenCalled();
     });
   });
 });

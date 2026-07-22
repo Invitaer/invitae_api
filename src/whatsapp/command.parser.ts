@@ -17,10 +17,100 @@ const FILTER_STATUS_MAP: Record<string, RsvpFilterStatus> = {
   rechazados: 'DECLINED',
 };
 
+/**
+ * Every free-text phrase the bot understands, keyed by its ALREADY-NORMALIZED
+ * form (see `normalizeText`): lowercase, no diacritics, single-spaced. Each
+ * button/list action the bot can send has at least one typeable synonym here,
+ * so nothing is reachable only by tapping.
+ *
+ * `SELECT_EVENT` is deliberately absent — see the note at the end of
+ * `parseText`.
+ */
+const TEXT_COMMANDS: Record<string, BotIntent> = {
+  // MENU
+  menu: { kind: 'MENU' },
+  help: { kind: 'MENU' },
+  ayuda: { kind: 'MENU' },
+  opciones: { kind: 'MENU' },
+  inicio: { kind: 'MENU' },
+  comandos: { kind: 'MENU' },
+  hola: { kind: 'MENU' },
+  empezar: { kind: 'MENU' },
+  start: { kind: 'MENU' },
+
+  // MENU_MORE
+  mas: { kind: 'MENU_MORE' },
+  'mas opciones': { kind: 'MENU_MORE' },
+  'otras opciones': { kind: 'MENU_MORE' },
+  'ver opciones': { kind: 'MENU_MORE' },
+
+  // LIST_EVENTS
+  eventos: { kind: 'LIST_EVENTS' },
+  'mis eventos': { kind: 'LIST_EVENTS' },
+  'ver eventos': { kind: 'LIST_EVENTS' },
+  'listar eventos': { kind: 'LIST_EVENTS' },
+  'cambiar evento': { kind: 'LIST_EVENTS' },
+  'elegir evento': { kind: 'LIST_EVENTS' },
+  'otro evento': { kind: 'LIST_EVENTS' },
+
+  // EVENT_DETAIL
+  detalle: { kind: 'EVENT_DETAIL' },
+  'detalle del evento': { kind: 'EVENT_DETAIL' },
+  informacion: { kind: 'EVENT_DETAIL' },
+  info: { kind: 'EVENT_DETAIL' },
+  'ver evento': { kind: 'EVENT_DETAIL' },
+  'datos del evento': { kind: 'EVENT_DETAIL' },
+
+  // RSVP_SUMMARY
+  resumen: { kind: 'RSVP_SUMMARY' },
+  estadisticas: { kind: 'RSVP_SUMMARY' },
+  totales: { kind: 'RSVP_SUMMARY' },
+  conteo: { kind: 'RSVP_SUMMARY' },
+  numeros: { kind: 'RSVP_SUMMARY' },
+
+  // CANCEL
+  cancelar: { kind: 'CANCEL' },
+  cancela: { kind: 'CANCEL' },
+  salir: { kind: 'CANCEL' },
+  abortar: { kind: 'CANCEL' },
+  descartar: { kind: 'CANCEL' },
+
+  // START_ADD_GUEST
+  agregar: { kind: 'START_ADD_GUEST' },
+  'agregar invitado': { kind: 'START_ADD_GUEST' },
+  'agregar usuario': { kind: 'START_ADD_GUEST' },
+  'agregar persona': { kind: 'START_ADD_GUEST' },
+  'anadir invitado': { kind: 'START_ADD_GUEST' },
+  'nuevo invitado': { kind: 'START_ADD_GUEST' },
+  'sumar invitado': { kind: 'START_ADD_GUEST' },
+  'alta invitado': { kind: 'START_ADD_GUEST' },
+
+  // CONFIRM_ACTION — `si` is the normalized form of "sí".
+  confirmar: { kind: 'CONFIRM_ACTION' },
+  confirmo: { kind: 'CONFIRM_ACTION' },
+  si: { kind: 'CONFIRM_ACTION' },
+  ok: { kind: 'CONFIRM_ACTION' },
+  dale: { kind: 'CONFIRM_ACTION' },
+  correcto: { kind: 'CONFIRM_ACTION' },
+  acepto: { kind: 'CONFIRM_ACTION' },
+
+  // RESUME_EVENT — answers the post-inactivity "same event?" gate.
+  continuar: { kind: 'RESUME_EVENT' },
+  'si continuar': { kind: 'RESUME_EVENT' },
+  seguir: { kind: 'RESUME_EVENT' },
+  'mismo evento': { kind: 'RESUME_EVENT' },
+
+  // FILTER_BY_STATUS — bare status words, mirroring the "Ver confirmados"
+  // style list rows. The `filtrar <estado>` phrasing is handled by pattern.
+  confirmados: { kind: 'FILTER_BY_STATUS', status: 'ACCEPTED' },
+  pendientes: { kind: 'FILTER_BY_STATUS', status: 'PENDING' },
+  rechazados: { kind: 'FILTER_BY_STATUS', status: 'DECLINED' },
+};
+
 const SELECT_EVENT_PATTERN = /^select_event:(.+)$/;
 const FILTER_BUTTON_PATTERN = /^filter:(confirmados|pendientes|rechazados)$/;
-const SEARCH_TEXT_PATTERN = /^(?:buscar|status)\s+(.+)$/i;
-const FILTER_TEXT_PATTERN = /^filtrar\s+(confirmados|pendientes|rechazados)$/i;
+const SEARCH_TEXT_PATTERN = /^(?:buscar\s+invitado|buscar|busca|status)\s+(.+)$/i;
+const FILTER_TEXT_PATTERN = /^filtrar\s+(confirmados|pendientes|rechazados)$/;
 const EDIT_GUEST_PATTERN = /^edit_guest:(.+)$/;
 const RSVP_CONFIRM_PATTERN = /^confirmar:(.+)$/;
 const RSVP_DECLINE_PATTERN = /^rechazar:(.+)$/;
@@ -53,6 +143,8 @@ function parseInteractiveId(interactiveId: string): BotIntent | undefined {
   switch (interactiveId) {
     case 'menu':
       return { kind: 'MENU' };
+    case 'menu_more':
+      return { kind: 'MENU_MORE' };
     case 'list_events':
       return { kind: 'LIST_EVENTS' };
     case 'detalle':
@@ -65,6 +157,8 @@ function parseInteractiveId(interactiveId: string): BotIntent | undefined {
       return { kind: 'START_ADD_GUEST' };
     case 'confirm':
       return { kind: 'CONFIRM_ACTION' };
+    case 'resume_event':
+      return { kind: 'RESUME_EVENT' };
   }
 
   const selectMatch = interactiveId.match(SELECT_EVENT_PATTERN);
@@ -98,36 +192,43 @@ function parseInteractiveId(interactiveId: string): BotIntent | undefined {
   return undefined;
 }
 
+/**
+ * Canonical form used for ALL keyword matching: lowercased, diacritics
+ * stripped, internal whitespace collapsed, and surrounding punctuation
+ * removed. This is what makes `Menú`, `MENU`, `  menú  ` and `¿menú?` all
+ * resolve to the same command instead of falling through to UNKNOWN.
+ */
+export function normalizeText(input: string): string {
+  return input
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    // Commas/semicolons act as word separators so a user echoing a button
+    // label verbatim ("Si, continuar") still matches its phrase.
+    .replace(/[,;]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[¿¡?!.,\s]+/, '')
+    .replace(/[¿¡?!.,\s]+$/, '');
+}
+
 function parseText(text: string): BotIntent {
-  const lower = text.toLowerCase();
+  const normalized = normalizeText(text);
 
-  if (lower === 'menu' || lower === 'help' || lower === 'ayuda') {
-    return { kind: 'MENU' };
-  }
-  if (lower === 'mis eventos' || lower === 'eventos') {
-    return { kind: 'LIST_EVENTS' };
-  }
-  if (lower === 'detalle') {
-    return { kind: 'EVENT_DETAIL' };
-  }
-  if (lower === 'resumen') {
-    return { kind: 'RSVP_SUMMARY' };
-  }
-  if (lower === 'cancelar') {
-    return { kind: 'CANCEL' };
-  }
-  if (lower === 'agregar' || lower === 'agregar invitado') {
-    return { kind: 'START_ADD_GUEST' };
+  // `hasOwnProperty` guard: a bare index would resolve inherited keys such as
+  // "constructor" or "toString" to Object.prototype members.
+  if (Object.prototype.hasOwnProperty.call(TEXT_COMMANDS, normalized)) {
+    return TEXT_COMMANDS[normalized];
   }
 
-  // Case-insensitive keyword match, but preserve original casing of the
-  // search term itself (guest names may be case-sensitive to the user).
+  // Matched on the ORIGINAL text so the search term keeps its casing and
+  // accents (guest names are matched against the database as typed).
   const searchMatch = text.match(SEARCH_TEXT_PATTERN);
   if (searchMatch) {
     return { kind: 'SEARCH_GUEST', term: searchMatch[1].trim() };
   }
 
-  const filterMatch = lower.match(FILTER_TEXT_PATTERN);
+  const filterMatch = normalized.match(FILTER_TEXT_PATTERN);
   if (filterMatch) {
     return { kind: 'FILTER_BY_STATUS', status: FILTER_STATUS_MAP[filterMatch[1]] };
   }

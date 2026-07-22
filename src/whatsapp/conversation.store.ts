@@ -1,11 +1,23 @@
 import { Injectable } from '@nestjs/common';
 import { RedisService } from '../redis/redis.service';
+import { BotIntent } from './bot-intent';
 import { PendingAction } from './flow.machine';
 
 export interface ConversationContext {
   userId: string;
   currentEventId?: string;
   pendingAction?: PendingAction;
+  /**
+   * Epoch ms of the last write to this context. Stamped by `set` (never by
+   * callers) so it can never drift out of sync with the sliding TTL below.
+   * The service uses it to decide when to re-confirm the active event.
+   */
+  lastInteractionAt?: number;
+  /**
+   * Intent parked while the user answers the "still working on this event?"
+   * re-confirmation gate, replayed once they confirm.
+   */
+  pendingIntent?: BotIntent;
 }
 
 const CONTEXT_TTL_SECONDS = 1800; // 30 minutes, sliding — refreshed on every `set`
@@ -23,7 +35,15 @@ export class ConversationStore {
   }
 
   async set(phoneNumber: string, ctx: ConversationContext): Promise<void> {
-    await this.redisService.set(this.key(phoneNumber), JSON.stringify(ctx), CONTEXT_TTL_SECONDS);
+    // The timestamp is stamped HERE, on every single write, rather than by
+    // callers — that is what keeps it in lockstep with the sliding TTL the
+    // same call refreshes.
+    const stamped: ConversationContext = { ...ctx, lastInteractionAt: Date.now() };
+    await this.redisService.set(
+      this.key(phoneNumber),
+      JSON.stringify(stamped),
+      CONTEXT_TTL_SECONDS,
+    );
   }
 
   async clear(phoneNumber: string): Promise<void> {

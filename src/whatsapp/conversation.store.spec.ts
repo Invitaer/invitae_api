@@ -51,16 +51,48 @@ describe('ConversationStore', () => {
   });
 
   describe('set', () => {
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
     it('persists the context as JSON with a 30-minute (1800s) sliding TTL', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-07-19T12:00:00.000Z'));
       const ctx = { userId: 'user-1', currentEventId: 'event-1' };
 
       await store.set('+5491100000000', ctx);
 
       expect(redisServiceMock.set).toHaveBeenCalledWith(
         'wa:ctx:+5491100000000',
-        JSON.stringify(ctx),
+        JSON.stringify({ ...ctx, lastInteractionAt: Date.now() }),
         1800,
       );
+    });
+
+    it('stamps lastInteractionAt on EVERY write so it can never drift out of sync with the sliding TTL', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-07-19T12:00:00.000Z'));
+      await store.set('+5491100000000', { userId: 'user-1' });
+      const first = JSON.parse(redisServiceMock.set.mock.calls[0][1]);
+
+      jest.setSystemTime(new Date('2026-07-19T12:05:00.000Z'));
+      await store.set('+5491100000000', { userId: 'user-1', lastInteractionAt: first.lastInteractionAt });
+      const second = JSON.parse(redisServiceMock.set.mock.calls[1][1]);
+
+      expect(second.lastInteractionAt).toBe(Date.now());
+      expect(second.lastInteractionAt).toBeGreaterThan(first.lastInteractionAt);
+    });
+
+    it('round-trips pendingIntent through get', async () => {
+      redisServiceMock.get.mockResolvedValue(
+        JSON.stringify({
+          userId: 'user-1',
+          currentEventId: 'event-1',
+          pendingIntent: { kind: 'RSVP_SUMMARY' },
+        }),
+      );
+
+      const ctx = await store.get('+5491100000000');
+
+      expect(ctx?.pendingIntent).toEqual({ kind: 'RSVP_SUMMARY' });
     });
   });
 

@@ -21,7 +21,6 @@ lerna-debug.log*
 .env.*
 # Tracked, secret-free env config (real secrets live in an untracked .env)
 !.env.example
-!.env.local
 
 # Drizzle generated migrations (keep the folder, ignore generated files)
 drizzle/migrations/*.sql
