@@ -1670,6 +1670,55 @@ describe('WhatsappService', () => {
       expect(whatsappLinkServiceMock.resolvePhone).not.toHaveBeenCalled();
     });
 
+    it('REGRESSION: the exact quick-reply payloads sent with the MARKETING template resolve unchanged', async () => {
+      // These are byte-identical to what `NotificationsService.sendInvitation`
+      // passes as `buttonPayloads` to `sendTemplateWithResult`. The template
+      // fallback adds NO inbound code — if this breaks, cold guests can tap a
+      // button and have their RSVP silently dropped.
+      const [yesPayload, noPayload] = [
+        `guest_rsvp_yes:${GUEST_ID}`,
+        `guest_rsvp_no:${GUEST_ID}`,
+      ];
+
+      for (const [payload, expectedStatus] of [
+        [yesPayload, 'ACCEPTED'],
+        [noPayload, 'DECLINED'],
+      ] as const) {
+        guestsServiceMock.update.mockClear();
+        guestsServiceMock.findByIdUnscoped.mockResolvedValue({
+          id: GUEST_ID,
+          eventId: EVENT_ID,
+          rsvpStatus: 'PENDING',
+        });
+
+        await service.handleIncoming({
+          entry: [
+            {
+              changes: [
+                {
+                  value: {
+                    messages: [
+                      {
+                        id: `m-tpl-${expectedStatus}`,
+                        from: GUEST_PHONE,
+                        type: 'button',
+                        button: { payload, text: 'Asistire' },
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        });
+
+        expect(guestsServiceMock.update).toHaveBeenCalledWith(EVENT_ID, GUEST_ID, {
+          rsvpStatus: expectedStatus,
+        });
+        expect(whatsappLinkServiceMock.resolvePhone).not.toHaveBeenCalled();
+      }
+    });
+
     it('a tap OVERWRITES an organizer-set ACCEPTED status, with no lock or rejection', async () => {
       guestsServiceMock.findByIdUnscoped.mockResolvedValue({
         id: GUEST_ID,

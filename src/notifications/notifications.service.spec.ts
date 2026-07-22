@@ -66,11 +66,18 @@ function buildMockDb(selectResultsQueue: unknown[][] = []) {
 describe('NotificationsService', () => {
   let service: NotificationsService;
   let dbServiceMock: { db: ReturnType<typeof buildMockDb> };
-  let whatsappClientMock: { sendWithResult: jest.Mock };
+  let whatsappClientMock: { sendWithResult: jest.Mock; sendTemplateWithResult: jest.Mock };
 
   beforeEach(async () => {
     dbServiceMock = { db: buildMockDb() };
-    whatsappClientMock = { sendWithResult: jest.fn() };
+    whatsappClientMock = {
+      sendWithResult: jest.fn(),
+      // Default: the template fallback is reachable but fails, so a test that
+      // does not opt into it explicitly cannot silently "pass" through it.
+      sendTemplateWithResult: jest
+        .fn()
+        .mockResolvedValue({ ok: false, reason: SendFailureReason.UNKNOWN }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -152,7 +159,7 @@ describe('NotificationsService', () => {
       );
     });
 
-    it('produces a mixed-batch result distinguishing a 131047 (window closed) failure from a success, never throwing', async () => {
+    it('produces a mixed-batch result where a 131047 recipient carries the TEMPLATE failure, never throwing', async () => {
       dbServiceMock.db = buildMockDb([[mockGuestA, mockGuestB], [], [EVENT_ROW], [USER_ROW]]);
       whatsappClientMock.sendWithResult
         .mockResolvedValueOnce({ ok: true, messageId: 'wamid.1' })
@@ -161,19 +168,27 @@ describe('NotificationsService', () => {
           reason: SendFailureReason.WINDOW_CLOSED,
           graphCode: 131047,
         });
+      whatsappClientMock.sendTemplateWithResult.mockResolvedValue({
+        ok: false,
+        reason: SendFailureReason.MARKETING_THROTTLED,
+        graphCode: 131049,
+      });
 
       const result = await service.notifySelected('event-uuid-1', ['guest-uuid-1', 'guest-uuid-2']);
 
       expect(result.sentCount).toBe(1);
       expect(result.failedCount).toBe(1);
+      // The template result is the SOLE outcome for the cold recipient — the
+      // failed free-form attempt is not reported separately.
       expect(result.recipients).toContainEqual(
         expect.objectContaining({
           id: 'guest-uuid-2',
           status: 'failed',
-          reason: SendFailureReason.WINDOW_CLOSED,
-          graphCode: 131047,
+          reason: SendFailureReason.MARKETING_THROTTLED,
+          graphCode: 131049,
         }),
       );
+      expect(result.recipients).toHaveLength(2);
     });
 
     it('keeps a 131049 (marketing throttled) failure DISTINCT from a 131047 (window closed) failure', async () => {
@@ -401,6 +416,11 @@ describe('NotificationsService', () => {
           ? Promise.resolve({ ok: false, reason: SendFailureReason.WINDOW_CLOSED, graphCode: 131047 })
           : Promise.resolve({ ok: true }),
       );
+      whatsappClientMock.sendTemplateWithResult.mockResolvedValue({
+        ok: false,
+        reason: SendFailureReason.MARKETING_THROTTLED,
+        graphCode: 131049,
+      });
 
       const result = await service.notifySelected('event-uuid-1', ['g-sent', 'g-skip', 'g-fail']);
 
@@ -428,9 +448,151 @@ describe('NotificationsService', () => {
         name: 'Fail',
         phone: '541100000005',
         status: 'failed',
+        reason: SendFailureReason.MARKETING_THROTTLED,
+        graphCode: 131049,
+      });
+      // One outcome per recipient, always — the template fallback never adds
+      // or drops a row.
+      expect(result.recipients).toHaveLength(3);
+    });
+  });
+
+  describe('notifySelected — cold-guest template fallback (24h window closed)', () => {
+    const TEMPLATE_ARGS = {
+      name: 'guest_invite_rsvp',
+      lang: 'es',
+      message: 'Esperamos que puedas acompañarnos',
+    };
+
+    it('does NOT touch the template when the free-form send succeeds (in-window guest)', async () => {
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
+      whatsappClientMock.sendWithResult.mockResolvedValue({ ok: true });
+
+      const result = await service.notifySelected('event-uuid-1', ['guest-uuid-1']);
+
+      expect(whatsappClientMock.sendTemplateWithResult).not.toHaveBeenCalled();
+      expect(result.sentCount).toBe(1);
+      expect(result.recipients).toHaveLength(1);
+    });
+
+    it('falls back to the approved template on WINDOW_CLOSED and reports ONE "sent" outcome', async () => {
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
+      whatsappClientMock.sendWithResult.mockResolvedValue({
+        ok: false,
         reason: SendFailureReason.WINDOW_CLOSED,
         graphCode: 131047,
       });
+      whatsappClientMock.sendTemplateWithResult.mockResolvedValue({
+        ok: true,
+        messageId: 'wamid.tpl',
+      });
+
+      const result = await service.notifySelected('event-uuid-1', ['guest-uuid-1']);
+
+      expect(whatsappClientMock.sendTemplateWithResult).toHaveBeenCalledTimes(1);
+      const [phone, name, lang, bodyParams, buttonPayloads] =
+        whatsappClientMock.sendTemplateWithResult.mock.calls[0];
+      expect(phone).toBe('541100000001');
+      expect(name).toBe(TEMPLATE_ARGS.name);
+      expect(lang).toBe(TEMPLATE_ARGS.lang);
+      expect(bodyParams).toEqual(['Alice', 'Carlos', TEMPLATE_ARGS.message]);
+      expect(buttonPayloads).toEqual([
+        'guest_rsvp_yes:guest-uuid-1',
+        'guest_rsvp_no:guest-uuid-1',
+      ]);
+
+      expect(result.sentCount).toBe(1);
+      expect(result.failedCount).toBe(0);
+      expect(result.recipients).toEqual([
+        { id: 'guest-uuid-1', name: 'Alice', phone: '541100000001', status: 'sent' },
+      ]);
+      // invitationSent is flipped exactly once — the template send counts.
+      expect(dbServiceMock.db.update).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports ONE "failed" carrying the TEMPLATE reason when the fallback also fails', async () => {
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
+      whatsappClientMock.sendWithResult.mockResolvedValue({
+        ok: false,
+        reason: SendFailureReason.WINDOW_CLOSED,
+        graphCode: 131047,
+      });
+      whatsappClientMock.sendTemplateWithResult.mockResolvedValue({
+        ok: false,
+        reason: SendFailureReason.TEMPLATE_PARAM_INVALID,
+      });
+
+      const result = await service.notifySelected('event-uuid-1', ['guest-uuid-1']);
+
+      expect(result.failedCount).toBe(1);
+      expect(result.sentCount).toBe(0);
+      expect(result.recipients).toEqual([
+        {
+          id: 'guest-uuid-1',
+          name: 'Alice',
+          phone: '541100000001',
+          status: 'failed',
+          reason: SendFailureReason.TEMPLATE_PARAM_INVALID,
+          graphCode: undefined,
+        },
+      ]);
+      expect(dbServiceMock.db.update).not.toHaveBeenCalled();
+    });
+
+    it('does NOT fall back to the template for an INVALID_PHONE free-form failure', async () => {
+      const badPhoneGuest = { ...mockGuestA, id: 'guest-uuid-4', phone: '541100000123' };
+      dbServiceMock.db = buildMockDb([[badPhoneGuest], [], [EVENT_ROW], [USER_ROW]]);
+      whatsappClientMock.sendWithResult.mockResolvedValue({
+        ok: false,
+        reason: SendFailureReason.INVALID_PHONE,
+      });
+
+      const result = await service.notifySelected('event-uuid-1', ['guest-uuid-4']);
+
+      expect(whatsappClientMock.sendTemplateWithResult).not.toHaveBeenCalled();
+      expect(result.skippedCount).toBe(1);
+      expect(result.recipients).toHaveLength(1);
+      expect(result.recipients[0].status).toBe('skipped');
+    });
+
+    it('does NOT fall back to the template for a MARKETING_THROTTLED failure (only 131047 is a window problem)', async () => {
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
+      whatsappClientMock.sendWithResult.mockResolvedValue({
+        ok: false,
+        reason: SendFailureReason.MARKETING_THROTTLED,
+        graphCode: 131049,
+      });
+
+      const result = await service.notifySelected('event-uuid-1', ['guest-uuid-1']);
+
+      expect(whatsappClientMock.sendTemplateWithResult).not.toHaveBeenCalled();
+      expect(result.failedCount).toBe(1);
+      expect(result.recipients[0]).toMatchObject({
+        reason: SendFailureReason.MARKETING_THROTTLED,
+      });
+    });
+
+    it('applies the fallback PER NUMBER when a guest has additional phones', async () => {
+      dbServiceMock.db = buildMockDb([
+        [mockGuestA],
+        [{ guestId: 'guest-uuid-1', phone: '541100000099' }],
+        [EVENT_ROW],
+        [USER_ROW],
+      ]);
+      whatsappClientMock.sendWithResult.mockResolvedValue({
+        ok: false,
+        reason: SendFailureReason.WINDOW_CLOSED,
+        graphCode: 131047,
+      });
+      whatsappClientMock.sendTemplateWithResult.mockResolvedValue({ ok: true });
+
+      const result = await service.notifySelected('event-uuid-1', ['guest-uuid-1']);
+
+      expect(whatsappClientMock.sendTemplateWithResult).toHaveBeenCalledTimes(2);
+      const dialed = whatsappClientMock.sendTemplateWithResult.mock.calls.map(([p]) => p);
+      expect(dialed).toEqual(['541100000001', '541100000099']);
+      expect(result.sentCount).toBe(1);
+      expect(result.recipients).toHaveLength(1);
     });
   });
 
