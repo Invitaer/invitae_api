@@ -37,7 +37,7 @@ export class UserEventsService {
 
   async getStats(eventId: string): Promise<{
     total: number;
-    confirmed: number;
+    notified: number;
     notConfirmed: number;
     accepted: number;
     notAccepted: number;
@@ -59,7 +59,7 @@ export class UserEventsService {
 
     return {
       total,
-      confirmed: accepted + declined,
+      notified: accepted + declined,
       notConfirmed: pending,
       accepted,
       notAccepted: declined,
