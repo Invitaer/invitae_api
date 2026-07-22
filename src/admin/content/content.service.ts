@@ -1,11 +1,12 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { RedisService } from '../../redis/redis.service';
+import { Event } from '../../database/schema';
+import { projectInvitation } from '../../invitae/invitation.projection';
 import { InvitationDto } from './dto/invitation.dto';
 
 @Injectable()
 export class ContentService {
   private readonly CONTENT_PREFIX = 'content:';
-  private readonly INV_IDX_PREFIX = 'inv_idx:';
 
   constructor(private readonly redisService: RedisService) {}
 
@@ -37,36 +38,31 @@ export class ContentService {
     await this.redisService.del(this.contentKey(eventId, key));
   }
 
-  async setInvitation(eventId: string, dto: InvitationDto): Promise<InvitationDto> {
-    const newSlug = dto.metadata.slug;
+  /**
+   * The public URL of an invitation is owned by `events.slug` (unique at the DB
+   * level), never by the request body. A client-supplied slug is overwritten, not
+   * honored — otherwise event B could claim event A's public URL.
+   */
+  async setInvitation(event: Event, dto: InvitationDto): Promise<InvitationDto> {
+    dto.metadata.slug = event.slug;
+    dto.metadata.eventType = event.eventType;
 
-    // If the event already has an invitation with a different slug, remove the old index
-    const existing = await this.redisService.get(this.invKey(eventId));
-    if (existing) {
-      const oldSlug = (JSON.parse(existing) as InvitationDto).metadata.slug;
-      if (oldSlug !== newSlug) {
-        await this.redisService.del(`${this.INV_IDX_PREFIX}${oldSlug}`);
-      }
-    }
-
-    await this.redisService.set(this.invKey(eventId), JSON.stringify(dto));
-    await this.redisService.set(`${this.INV_IDX_PREFIX}${newSlug}`, eventId);
-    Logger.log(`setInvitation: eventId=${eventId} slug=${newSlug}`);
+    await this.redisService.set(this.invKey(event.id), JSON.stringify(dto));
+    Logger.log(`setInvitation: eventId=${event.id} slug=${event.slug}`);
     return dto;
   }
 
-  async getInvitation(eventId: string): Promise<InvitationDto> {
-    const raw = await this.redisService.get(this.invKey(eventId));
-    if (!raw) throw new NotFoundException(`Invitation for event '${eventId}' not found`);
-    return JSON.parse(raw) as InvitationDto;
+  /**
+   * Projected on read, exactly like the public endpoint, so the editor preview
+   * always shows what guests will actually see.
+   */
+  async getInvitation(event: Event): Promise<InvitationDto> {
+    const raw = await this.redisService.get(this.invKey(event.id));
+    if (!raw) throw new NotFoundException(`Invitation for event '${event.id}' not found`);
+    return projectInvitation(JSON.parse(raw) as InvitationDto, event);
   }
 
   async deleteInvitation(eventId: string): Promise<void> {
-    const raw = await this.redisService.get(this.invKey(eventId));
-    if (raw) {
-      const slug = (JSON.parse(raw) as InvitationDto).metadata.slug;
-      await this.redisService.del(`${this.INV_IDX_PREFIX}${slug}`);
-    }
     await this.redisService.del(this.invKey(eventId));
   }
 }

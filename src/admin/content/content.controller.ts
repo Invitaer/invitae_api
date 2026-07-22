@@ -62,12 +62,12 @@ export class ContentController {
     @CurrentEvent() event: Event,
     @Body() dto: InvitationDto,
   ): Promise<InvitationDto> {
-    return this.contentService.setInvitation(event.id, dto);
+    return this.contentService.setInvitation(event, dto);
   }
 
   @Get('invitation')
   getInvitation(@CurrentEvent() event: Event): Promise<InvitationDto> {
-    return this.contentService.getInvitation(event.id);
+    return this.contentService.getInvitation(event);
   }
 
   @Delete('invitation')

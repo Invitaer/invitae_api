@@ -1,3 +1,4 @@
+import { Transform } from 'class-transformer';
 import {
   IsArray,
   IsEmail,
@@ -10,6 +11,10 @@ import {
 } from 'class-validator';
 import { RsvpStatus } from '../../../database/schema/guests.schema';
 
+/** Treat a blank string as "no value" so optional fields validate cleanly. */
+const emptyToNull = ({ value }: { value: unknown }) =>
+  value === '' ? null : value;
+
 export class CreateGuestDto {
   @IsString()
   name: string;
@@ -19,7 +24,8 @@ export class CreateGuestDto {
 
   @IsEmail()
   @IsOptional()
-  email?: string;
+  @Transform(emptyToNull)
+  email?: string | null;
 
   @IsUUID()
   @IsOptional()

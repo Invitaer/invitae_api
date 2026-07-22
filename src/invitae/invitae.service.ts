@@ -1,10 +1,11 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import { DatabaseService } from '../database/database.service';
-import { Guest, guests } from '../database/schema';
+import { Event, events, Guest, guests } from '../database/schema';
 import { RedisService } from '../redis/redis.service';
 import { InvitationDto } from '../admin/content/dto/invitation.dto';
 import { ConfirmAttendanceDto } from './dto/confirm-attendance.dto';
+import { projectInvitation } from './invitation.projection';
 
 /**
  * Public projection of a guest — the only guest fields a non-authenticated
@@ -23,15 +24,22 @@ export interface GuestInvitationResponse extends InvitationDto {
 
 @Injectable()
 export class InvitaeService {
-  private readonly INV_IDX_PREFIX = 'inv_idx:';
-
   constructor(
     private readonly databaseService: DatabaseService,
     private readonly redisService: RedisService,
   ) {}
 
   async confirmAttendance(dto: ConfirmAttendanceDto): Promise<PublicGuest> {
-    const eventId = await this.resolveEventId(dto.slug);
+    const event = await this.findEventBySlug(dto.slug);
+    const eventId = event.id;
+
+    // RSVP is a PUBLIC, unauthenticated write, gated on the invitation actually
+    // having been published — not merely on the event row existing. An event row
+    // is created the moment the admin saves the event; the write path must stay
+    // closed until its invitation content exists. Assert BEFORE any mutation.
+    if (!(await this.readStoredInvitation(event))) {
+      throw new NotFoundException(`Invitation '${dto.slug}' not found`);
+    }
 
     // Scope the write by (guestId AND eventId): a guest can only be confirmed
     // through the invitation of the event they actually belong to. A mismatch
@@ -54,36 +62,54 @@ export class InvitaeService {
   }
 
   async getInvitation(slug: string): Promise<InvitationDto> {
-    const eventId = await this.resolveEventId(slug);
-    return this.loadInvitation(slug, eventId);
+    const event = await this.findEventBySlug(slug);
+    return this.loadInvitation(event);
   }
 
   async getGuestInvitation(
     slug: string,
     guestId: string,
   ): Promise<GuestInvitationResponse> {
-    const eventId = await this.resolveEventId(slug);
-    const invitation = await this.loadInvitation(slug, eventId);
-    const guest = await this.findEventGuest(eventId, guestId);
+    const event = await this.findEventBySlug(slug);
+    const invitation = await this.loadInvitation(event);
+    const guest = await this.findEventGuest(event.id, guestId);
     return { ...invitation, guest: this.toPublicGuest(guest) };
   }
 
-  /** Maps a public slug to its event id via the Redis slug index. */
-  private async resolveEventId(slug: string): Promise<string> {
-    const eventId = await this.redisService.get(
-      `${this.INV_IDX_PREFIX}${slug}`,
-    );
-    if (!eventId) throw new NotFoundException(`Invitation '${slug}' not found`);
-    return eventId;
+  /**
+   * Resolves a public slug to its event row. `events.slug` is unique at the DB
+   * level, so the row is the single source of truth for who owns a public URL —
+   * no separate Redis index to go stale or be claimed by another event.
+   */
+  private async findEventBySlug(slug: string): Promise<Event> {
+    const [event] = await this.databaseService.db
+      .select()
+      .from(events)
+      .where(eq(events.slug, slug));
+
+    if (!event) throw new NotFoundException(`Invitation '${slug}' not found`);
+    return event;
   }
 
-  private async loadInvitation(
-    slug: string,
-    eventId: string,
-  ): Promise<InvitationDto> {
-    const raw = await this.redisService.get(`event:${eventId}:invitation`);
-    if (!raw) throw new NotFoundException(`Invitation '${slug}' not found`);
-    return JSON.parse(raw) as InvitationDto;
+  /**
+   * Loads the stored presentation content and projects the event row over it, so
+   * the served payload can never disagree with the DB about identity, names,
+   * date or type.
+   */
+  /**
+   * Single definition of the stored-content key. Returns the raw JSON string, or
+   * null when the invitation was never published.
+   */
+  private async readStoredInvitation(event: Event): Promise<string | null> {
+    return this.redisService.get(`event:${event.id}:invitation`);
+  }
+
+  private async loadInvitation(event: Event): Promise<InvitationDto> {
+    const raw = await this.readStoredInvitation(event);
+    if (!raw) {
+      throw new NotFoundException(`Invitation '${event.slug}' not found`);
+    }
+    return projectInvitation(JSON.parse(raw) as InvitationDto, event);
   }
 
   /** Loads a guest scoped to the event; 404 if it belongs to another event. */
