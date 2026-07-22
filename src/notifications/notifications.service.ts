@@ -1,15 +1,15 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { and, eq, inArray } from 'drizzle-orm';
-import { DatabaseService } from '../database/database.service';
-import { guests, Guest, RsvpStatus, events, users, guestPhones } from '../database/schema';
 import { buildGuestFilter } from '../admin/guests/guest-filter';
-import { WhatsappClient, SendFailureReason, SendOutcome } from '../whatsapp/whatsapp.client';
-import { normalizeWhatsappRecipient } from '../whatsapp/phone.util';
+import { DatabaseService } from '../database/database.service';
+import { Guest, RsvpStatus, events, guestPhones, guests, users } from '../database/schema';
 import {
   DEFAULT_INVITE_MESSAGE,
   GUEST_INVITE_TEMPLATE_LANG,
   GUEST_INVITE_TEMPLATE_NAME,
 } from '../whatsapp/guest-invite-template.const';
+import { normalizeWhatsappRecipient } from '../whatsapp/phone.util';
+import { SendFailureReason, SendOutcome, WhatsappClient } from '../whatsapp/whatsapp.client';
 
 /** A recipient guest plus every extra number registered in `guest_phones`. */
 type GuestWithPhones = Guest & { additionalPhones: string[] };
@@ -140,7 +140,7 @@ export class NotificationsService {
     let skippedCount = 0;
 
     for (const guest of recipients) {
-      const body = `Hola ${guest.name}, ${inviterName} te ha invitado a su evento, ¿quieres confirmar tu asistencia?`;
+      const body = `Hola ${guest.name}, ${inviterName} te ha invitado a su evento, ¿te gustaría confirmar tu asistencia?`;
       const buttons = [
         { id: `guest_rsvp_yes:${guest.id}`, title: 'Asistiré' },
         { id: `guest_rsvp_no:${guest.id}`, title: 'No podré asistir' },

@@ -8,9 +8,9 @@ jest.mock('../config/secrets', () => ({
 jest.mock('../database/database.service');
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { NotificationsService } from './notifications.service';
 import { DatabaseService } from '../database/database.service';
-import { WhatsappClient, SendFailureReason } from '../whatsapp/whatsapp.client';
+import { SendFailureReason, WhatsappClient } from '../whatsapp/whatsapp.client';
+import { NotificationsService } from './notifications.service';
 
 const mockGuestA = {
   id: 'guest-uuid-1',
@@ -109,7 +109,7 @@ describe('NotificationsService', () => {
       const [phone, body, buttons] = whatsappClientMock.sendWithResult.mock.calls[0];
       expect(phone).toBe('541100000001');
       expect(body).toBe(
-        'Hola Alice, Carlos te ha invitado a su evento, ¿quieres confirmar tu asistencia?',
+        'Hola Alice, Carlos te ha invitado a su evento, ¿te gustaría confirmar tu asistencia?',
       );
       expect(buttons).toEqual([
         { id: 'guest_rsvp_yes:guest-uuid-1', title: 'Asistiré' },
