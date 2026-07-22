@@ -1,6 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { secrets } from '../config/secrets';
 import { normalizeWhatsappRecipient } from './phone.util';
+import {
+  MAX_TEMPLATE_PARAM_LENGTH,
+  validateTemplateParam,
+} from './guest-invite-template.const';
 
 interface InteractiveButton {
   id: string;
@@ -23,6 +27,12 @@ export enum SendFailureReason {
   WINDOW_CLOSED = 'window_closed',
   MARKETING_THROTTLED = 'marketing_throttled',
   INVALID_PHONE = 'invalid_phone',
+  /**
+   * A template parameter would be rejected by Graph (`132012` shape,
+   * `132005` length). Kept distinct because the operator remedy is "fix the
+   * copy", never "retry" — no Graph round-trip is spent on it.
+   */
+  TEMPLATE_PARAM_INVALID = 'template_param_invalid',
   TRANSPORT = 'transport',
   UNKNOWN = 'unknown',
 }
@@ -119,6 +129,61 @@ export class WhatsappClient {
             reply: { id: button.id, title: button.title },
           })),
         },
+      },
+    });
+  }
+
+  /**
+   * Sends the approved MARKETING template — the ONLY way to reach a guest
+   * outside the 24h customer service window. Both quick-reply buttons carry
+   * DYNAMIC payloads (each encodes the guestId), so index 0 AND 1 must be
+   * supplied: a single payload could not distinguish which button was tapped.
+   *
+   * Validation happens BEFORE the payload is built, so a bad parameter costs
+   * zero Graph round-trips. Delivery itself reuses `postWithResult`, which
+   * keeps recipient normalization, error taxonomy and wamid capture identical
+   * to `sendWithResult`.
+   */
+  async sendTemplateWithResult(
+    to: string,
+    templateName: string,
+    language: string,
+    bodyParams: string[],
+    buttonPayloads: string[],
+  ): Promise<SendOutcome> {
+    if (!isValidPhoneShape(to)) {
+      return { ok: false, reason: SendFailureReason.INVALID_PHONE };
+    }
+
+    const everyParamValid = [...bodyParams, ...buttonPayloads].every(validateTemplateParam);
+    const substitutedLength = bodyParams.join('').length;
+
+    if (!everyParamValid || substitutedLength >= MAX_TEMPLATE_PARAM_LENGTH) {
+      this.logger.error(
+        `Refusing to send template "${templateName}": a parameter violates Graph shape/length rules`,
+      );
+      return { ok: false, reason: SendFailureReason.TEMPLATE_PARAM_INVALID };
+    }
+
+    return this.postWithResult(to, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'template',
+      template: {
+        name: templateName,
+        language: { code: language },
+        components: [
+          {
+            type: 'body',
+            parameters: bodyParams.map((text) => ({ type: 'text', text })),
+          },
+          ...buttonPayloads.map((payload, index) => ({
+            type: 'button',
+            sub_type: 'quick_reply',
+            index,
+            parameters: [{ type: 'payload', payload }],
+          })),
+        ],
       },
     });
   }

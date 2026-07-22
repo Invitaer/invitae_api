@@ -162,4 +162,141 @@ describe('WhatsappClient', () => {
       expect(outcome).toEqual({ ok: false, reason: SendFailureReason.TRANSPORT });
     });
   });
+
+  describe('sendTemplateWithResult', () => {
+    const BODY_PARAMS = ['Alice', 'Carlos', 'Esperamos que puedas acompañarnos'];
+    const BUTTON_PAYLOADS = ['guest_rsvp_yes:guest-1', 'guest_rsvp_no:guest-1'];
+
+    function send(to = '+5491100000000') {
+      return client.sendTemplateWithResult(
+        to,
+        'guest_invite_rsvp',
+        'es',
+        BODY_PARAMS,
+        BUTTON_PAYLOADS,
+      );
+    }
+
+    it('POSTs a template payload with body params and two dynamic quick-reply buttons', async () => {
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ messages: [{ id: 'wamid.tpl' }] }),
+      } as Response);
+
+      const outcome = await send();
+
+      expect(outcome).toEqual({ ok: true, messageId: 'wamid.tpl' });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [, init] = fetchSpy.mock.calls[0];
+      expect(JSON.parse(init.body)).toEqual({
+        messaging_product: 'whatsapp',
+        // Argentine wa_id normalization still applies — same choke point.
+        to: '541100000000',
+        type: 'template',
+        template: {
+          name: 'guest_invite_rsvp',
+          language: { code: 'es' },
+          components: [
+            {
+              type: 'body',
+              parameters: [
+                { type: 'text', text: 'Alice' },
+                { type: 'text', text: 'Carlos' },
+                { type: 'text', text: 'Esperamos que puedas acompañarnos' },
+              ],
+            },
+            {
+              type: 'button',
+              sub_type: 'quick_reply',
+              index: 0,
+              parameters: [{ type: 'payload', payload: 'guest_rsvp_yes:guest-1' }],
+            },
+            {
+              type: 'button',
+              sub_type: 'quick_reply',
+              index: 1,
+              parameters: [{ type: 'payload', payload: 'guest_rsvp_no:guest-1' }],
+            },
+          ],
+        },
+      });
+    });
+
+    it('maps Graph error code 131049 to MARKETING_THROTTLED (templates are throttled, not window-blocked)', async () => {
+      fetchSpy.mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({ error: { code: 131049, message: 'throttled' } }),
+      } as Response);
+
+      expect(await send()).toEqual({
+        ok: false,
+        reason: SendFailureReason.MARKETING_THROTTLED,
+        graphCode: 131049,
+      });
+    });
+
+    it('returns INVALID_PHONE for a malformed phone WITHOUT calling fetch', async () => {
+      expect(await send('123')).toEqual({
+        ok: false,
+        reason: SendFailureReason.INVALID_PHONE,
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('returns TEMPLATE_PARAM_INVALID for a param with a newline WITHOUT calling fetch', async () => {
+      const outcome = await client.sendTemplateWithResult(
+        '+5491100000000',
+        'guest_invite_rsvp',
+        'es',
+        ['Alice', 'Carlos', 'Hola\nmundo'],
+        BUTTON_PAYLOADS,
+      );
+
+      expect(outcome).toEqual({
+        ok: false,
+        reason: SendFailureReason.TEMPLATE_PARAM_INVALID,
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('returns TEMPLATE_PARAM_INVALID when the substituted body reaches 1024 chars WITHOUT calling fetch', async () => {
+      const outcome = await client.sendTemplateWithResult(
+        '+5491100000000',
+        'guest_invite_rsvp',
+        'es',
+        ['Alice', 'Carlos', 'a'.repeat(1024)],
+        BUTTON_PAYLOADS,
+      );
+
+      expect(outcome).toEqual({
+        ok: false,
+        reason: SendFailureReason.TEMPLATE_PARAM_INVALID,
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('returns TEMPLATE_PARAM_INVALID when a button payload is empty WITHOUT calling fetch', async () => {
+      const outcome = await client.sendTemplateWithResult(
+        '+5491100000000',
+        'guest_invite_rsvp',
+        'es',
+        BODY_PARAMS,
+        ['guest_rsvp_yes:guest-1', ''],
+      );
+
+      expect(outcome).toEqual({
+        ok: false,
+        reason: SendFailureReason.TEMPLATE_PARAM_INVALID,
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('returns SendFailureReason.TRANSPORT when the fetch call itself throws', async () => {
+      fetchSpy.mockRejectedValue(new Error('network down'));
+
+      expect(await send()).toEqual({ ok: false, reason: SendFailureReason.TRANSPORT });
+    });
+  });
 });
