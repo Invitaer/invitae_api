@@ -244,7 +244,7 @@ describe('UserEventsService — getStats', () => {
 
     expect(result).toEqual({
       total: 6,
-      confirmed: 5,   // accepted + declined
+      notified: 5,    // accepted + declined
       notConfirmed: 1, // pending
       accepted: 3,
       notAccepted: 2,  // declined
@@ -267,7 +267,7 @@ describe('UserEventsService — getStats', () => {
 
     expect(result).toEqual({
       total: 0,
-      confirmed: 0,
+      notified: 0,
       notConfirmed: 0,
       accepted: 0,
       notAccepted: 0,
