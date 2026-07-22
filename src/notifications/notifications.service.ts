@@ -1,9 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { and, eq, inArray } from 'drizzle-orm';
 import { DatabaseService } from '../database/database.service';
-import { guests, Guest, RsvpStatus, events, users } from '../database/schema';
+import { guests, Guest, RsvpStatus, events, users, guestPhones } from '../database/schema';
 import { buildGuestFilter } from '../admin/guests/guest-filter';
 import { WhatsappClient, SendFailureReason } from '../whatsapp/whatsapp.client';
+import { normalizeWhatsappRecipient } from '../whatsapp/phone.util';
+
+/** A recipient guest plus every extra number registered in `guest_phones`. */
+type GuestWithPhones = Guest & { additionalPhones: string[] };
 
 export interface RecipientOutcome {
   id: string;
@@ -54,7 +58,25 @@ export class NotificationsService {
       .from(guests)
       .where(and(eq(guests.eventId, eventId), inArray(guests.id, guestIds)));
 
-    return this.dispatchLive(eventId, recipients);
+    if (recipients.length === 0) return this.emptyResult('live');
+
+    const recipientIds = recipients.map((g) => g.id);
+    const phoneRows = await this.databaseService.db
+      .select()
+      .from(guestPhones)
+      .where(inArray(guestPhones.guestId, recipientIds));
+
+    const additionalByGuestId = phoneRows.reduce<Record<string, string[]>>((acc, row) => {
+      (acc[row.guestId] ??= []).push(row.phone);
+      return acc;
+    }, {});
+
+    const withPhones: GuestWithPhones[] = recipients.map((g) => ({
+      ...g,
+      additionalPhones: additionalByGuestId[g.id] ?? [],
+    }));
+
+    return this.dispatchLive(eventId, withPhones);
   }
 
   /**
@@ -100,7 +122,10 @@ export class NotificationsService {
    * concurrency buys nothing. One failure never blocks the rest of the
    * batch. See `sdd/guest-whatsapp-notify/design` decision D6.
    */
-  private async dispatchLive(eventId: string, recipients: Guest[]): Promise<NotificationResult> {
+  private async dispatchLive(
+    eventId: string,
+    recipients: GuestWithPhones[],
+  ): Promise<NotificationResult> {
     if (recipients.length === 0) return this.emptyResult('live');
 
     const inviterName = await this.resolveInviterName(eventId);
@@ -110,38 +135,65 @@ export class NotificationsService {
     let skippedCount = 0;
 
     for (const guest of recipients) {
-      const outcome = await this.whatsappClient.sendWithResult(
-        guest.phone,
-        `Hola ${guest.name}, ${inviterName} te ha invitado a su evento, ¿quieres confirmar tu asistencia?`,
-        [
-          { id: `guest_rsvp_yes:${guest.id}`, title: 'Asistiré' },
-          { id: `guest_rsvp_no:${guest.id}`, title: 'No podré asistir' },
-        ],
-      );
+      const body = `Hola ${guest.name}, ${inviterName} te ha invitado a su evento, ¿quieres confirmar tu asistencia?`;
+      const buttons = [
+        { id: `guest_rsvp_yes:${guest.id}`, title: 'Asistiré' },
+        { id: `guest_rsvp_no:${guest.id}`, title: 'No podré asistir' },
+      ];
 
-      if (outcome.ok) {
-        sentCount += 1;
-        outcomes.push({ id: guest.id, name: guest.name, phone: guest.phone, status: 'sent' });
-        await this.flipInvitationSentBestEffort(guest.id);
-      } else if (outcome.reason === SendFailureReason.INVALID_PHONE) {
-        // Local pre-send validation failure — never blocks the batch.
+      // Fan out to the primary number AND every additional number, deduped by
+      // normalized wa_id so a primary==additional guest is never double-sent.
+      const targets = this.dedupeRecipientNumbers([guest.phone, ...guest.additionalPhones]);
+
+      if (targets.length === 0) {
         skippedCount += 1;
         outcomes.push({
           id: guest.id,
           name: guest.name,
           phone: guest.phone,
           status: 'skipped',
-          reason: outcome.reason,
+          reason: SendFailureReason.INVALID_PHONE,
         });
-      } else {
+        continue;
+      }
+
+      let anySent = false;
+      let firstHardFailure: { reason: SendFailureReason; graphCode?: number } | undefined;
+
+      for (const number of targets) {
+        const outcome = await this.whatsappClient.sendWithResult(number, body, buttons);
+
+        if (outcome.ok) {
+          anySent = true;
+        } else if (outcome.reason !== SendFailureReason.INVALID_PHONE && !firstHardFailure) {
+          firstHardFailure = { reason: outcome.reason, graphCode: outcome.graphCode };
+        }
+      }
+
+      // Aggregate ONE outcome per guest: any success wins, else the first
+      // non-INVALID_PHONE failure, else (all attempts invalid) skip.
+      if (anySent) {
+        sentCount += 1;
+        outcomes.push({ id: guest.id, name: guest.name, phone: guest.phone, status: 'sent' });
+        await this.flipInvitationSentBestEffort(guest.id);
+      } else if (firstHardFailure) {
         failedCount += 1;
         outcomes.push({
           id: guest.id,
           name: guest.name,
           phone: guest.phone,
           status: 'failed',
-          reason: outcome.reason,
-          graphCode: outcome.graphCode,
+          reason: firstHardFailure.reason,
+          graphCode: firstHardFailure.graphCode,
+        });
+      } else {
+        skippedCount += 1;
+        outcomes.push({
+          id: guest.id,
+          name: guest.name,
+          phone: guest.phone,
+          status: 'skipped',
+          reason: SendFailureReason.INVALID_PHONE,
         });
       }
     }
@@ -154,6 +206,27 @@ export class NotificationsService {
       skippedCount,
       recipients: outcomes,
     };
+  }
+
+  /**
+   * Drops empty/whitespace numbers and deduplicates the rest by their
+   * normalized wa_id (`normalizeWhatsappRecipient`), keeping the first
+   * occurrence's original string. `sendWithResult` normalizes again, so
+   * returning the raw value is safe (the normalization is idempotent).
+   */
+  private dedupeRecipientNumbers(numbers: string[]): string[] {
+    const seen = new Set<string>();
+    const result: string[] = [];
+
+    for (const raw of numbers) {
+      if (!raw || raw.trim() === '') continue;
+      const key = normalizeWhatsappRecipient(raw);
+      if (key === '' || seen.has(key)) continue;
+      seen.add(key);
+      result.push(raw);
+    }
+
+    return result;
   }
 
   /** notify-all / notify-pending stay mocked in this slice — no send is attempted. */

@@ -85,7 +85,7 @@ describe('NotificationsService', () => {
 
   describe('notifySelected — real per-recipient send (delivery: "live")', () => {
     it('sends a real interactive message to every recipient and reports "sent" outcomes', async () => {
-      dbServiceMock.db = buildMockDb([[mockGuestA], [EVENT_ROW], [USER_ROW]]);
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
       whatsappClientMock.sendWithResult.mockResolvedValue({ ok: true, messageId: 'wamid.1' });
 
       const result = await service.notifySelected('event-uuid-1', ['guest-uuid-1']);
@@ -127,7 +127,7 @@ describe('NotificationsService', () => {
 
     it('skips an invalid/empty-phone recipient WITHOUT blocking the rest of the batch', async () => {
       const invalidPhoneGuest = { ...mockGuestB, phone: '' };
-      dbServiceMock.db = buildMockDb([[mockGuestA, invalidPhoneGuest], [EVENT_ROW], [USER_ROW]]);
+      dbServiceMock.db = buildMockDb([[mockGuestA, invalidPhoneGuest], [], [EVENT_ROW], [USER_ROW]]);
       whatsappClientMock.sendWithResult.mockImplementation((phone: string) =>
         phone === ''
           ? Promise.resolve({ ok: false, reason: SendFailureReason.INVALID_PHONE })
@@ -153,7 +153,7 @@ describe('NotificationsService', () => {
     });
 
     it('produces a mixed-batch result distinguishing a 131047 (window closed) failure from a success, never throwing', async () => {
-      dbServiceMock.db = buildMockDb([[mockGuestA, mockGuestB], [EVENT_ROW], [USER_ROW]]);
+      dbServiceMock.db = buildMockDb([[mockGuestA, mockGuestB], [], [EVENT_ROW], [USER_ROW]]);
       whatsappClientMock.sendWithResult
         .mockResolvedValueOnce({ ok: true, messageId: 'wamid.1' })
         .mockResolvedValueOnce({
@@ -177,7 +177,7 @@ describe('NotificationsService', () => {
     });
 
     it('keeps a 131049 (marketing throttled) failure DISTINCT from a 131047 (window closed) failure', async () => {
-      dbServiceMock.db = buildMockDb([[mockGuestA], [EVENT_ROW], [USER_ROW]]);
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
       whatsappClientMock.sendWithResult.mockResolvedValue({
         ok: false,
         reason: SendFailureReason.MARKETING_THROTTLED,
@@ -195,6 +195,7 @@ describe('NotificationsService', () => {
     it('falls back to events.name when the resolved inviter name is empty/whitespace, resolved ONCE per call (not per recipient)', async () => {
       dbServiceMock.db = buildMockDb([
         [mockGuestA, mockGuestB],
+        [], // no additional phones
         [EVENT_ROW],
         [{ name: '   ' }], // whitespace-only user name
       ]);
@@ -205,13 +206,13 @@ describe('NotificationsService', () => {
       const bodies = whatsappClientMock.sendWithResult.mock.calls.map(([, body]) => body);
       expect(bodies[0]).toContain(EVENT_ROW.name);
       expect(bodies[1]).toContain(EVENT_ROW.name);
-      // Exactly 3 select() calls total (recipients, event, user) for 2
-      // recipients proves the name was resolved ONCE, not per recipient.
-      expect(dbServiceMock.db.select).toHaveBeenCalledTimes(3);
+      // Exactly 4 select() calls total (recipients, guest_phones, event, user)
+      // for 2 recipients proves the name was resolved ONCE, not per recipient.
+      expect(dbServiceMock.db.select).toHaveBeenCalledTimes(4);
     });
 
     it('flips guests.invitationSent to true (best-effort) after a successful send', async () => {
-      dbServiceMock.db = buildMockDb([[mockGuestA], [EVENT_ROW], [USER_ROW]]);
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
       whatsappClientMock.sendWithResult.mockResolvedValue({ ok: true });
 
       await service.notifySelected('event-uuid-1', ['guest-uuid-1']);
@@ -221,7 +222,7 @@ describe('NotificationsService', () => {
     });
 
     it('does NOT flip invitationSent when the send fails', async () => {
-      dbServiceMock.db = buildMockDb([[mockGuestA], [EVENT_ROW], [USER_ROW]]);
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
       whatsappClientMock.sendWithResult.mockResolvedValue({
         ok: false,
         reason: SendFailureReason.UNKNOWN,
@@ -233,13 +234,203 @@ describe('NotificationsService', () => {
     });
 
     it('swallows a failure while flipping invitationSent — never blocks the response (best-effort)', async () => {
-      dbServiceMock.db = buildMockDb([[mockGuestA], [EVENT_ROW], [USER_ROW]]);
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
       dbServiceMock.db._internals.updateWhere.mockRejectedValueOnce(new Error('db down'));
       whatsappClientMock.sendWithResult.mockResolvedValue({ ok: true });
 
       await expect(
         service.notifySelected('event-uuid-1', ['guest-uuid-1']),
       ).resolves.toMatchObject({ sentCount: 1 });
+    });
+  });
+
+  describe('notifySelected — multi-phone fan-out over guest_phones', () => {
+    it('sends to the primary AND every additional phone, reporting ONE "sent" outcome per guest', async () => {
+      dbServiceMock.db = buildMockDb([
+        [mockGuestA],
+        [
+          { guestId: 'guest-uuid-1', phone: '541100000002' },
+          { guestId: 'guest-uuid-1', phone: '541100000003' },
+        ],
+        [EVENT_ROW],
+        [USER_ROW],
+      ]);
+      whatsappClientMock.sendWithResult.mockResolvedValue({ ok: true });
+
+      const result = await service.notifySelected('event-uuid-1', ['guest-uuid-1']);
+
+      expect(whatsappClientMock.sendWithResult).toHaveBeenCalledTimes(3);
+      const dialed = whatsappClientMock.sendWithResult.mock.calls.map(([p]) => p);
+      expect(dialed).toEqual(['541100000001', '541100000002', '541100000003']);
+      expect(result.sentCount).toBe(1);
+      expect(result.notifiedCount).toBe(1);
+      expect(result.recipients).toEqual([
+        { id: 'guest-uuid-1', name: 'Alice', phone: '541100000001', status: 'sent' },
+      ]);
+      // flipInvitationSent runs exactly ONCE per guest, not once per phone.
+      expect(dbServiceMock.db.update).toHaveBeenCalledTimes(1);
+    });
+
+    it('deduplicates a primary that equals an additional number — sends only ONCE (Familia Martinez bug)', async () => {
+      const martinez = {
+        ...mockGuestA,
+        id: 'guest-uuid-9',
+        name: 'Familia Martinez',
+        phone: '523319638873',
+      };
+      dbServiceMock.db = buildMockDb([
+        [martinez],
+        [{ guestId: 'guest-uuid-9', phone: '523319638873' }],
+        [EVENT_ROW],
+        [USER_ROW],
+      ]);
+      whatsappClientMock.sendWithResult.mockResolvedValue({ ok: true });
+
+      const result = await service.notifySelected('event-uuid-1', ['guest-uuid-9']);
+
+      expect(whatsappClientMock.sendWithResult).toHaveBeenCalledTimes(1);
+      expect(result.sentCount).toBe(1);
+      expect(result.recipients).toEqual([
+        { id: 'guest-uuid-9', name: 'Familia Martinez', phone: '523319638873', status: 'sent' },
+      ]);
+    });
+
+    it('deduplicates by NORMALIZED number (an MX 521 wa_id additional collapses onto the 52 primary)', async () => {
+      const guest = { ...mockGuestA, id: 'guest-uuid-10', name: 'Mextel', phone: '523319638873' };
+      dbServiceMock.db = buildMockDb([
+        [guest],
+        [{ guestId: 'guest-uuid-10', phone: '5213319638873' }],
+        [EVENT_ROW],
+        [USER_ROW],
+      ]);
+      whatsappClientMock.sendWithResult.mockResolvedValue({ ok: true });
+
+      const result = await service.notifySelected('event-uuid-1', ['guest-uuid-10']);
+
+      expect(whatsappClientMock.sendWithResult).toHaveBeenCalledTimes(1);
+      expect(result.sentCount).toBe(1);
+    });
+
+    it('reports "sent" when the primary FAILS but an additional SUCCEEDS (any success wins)', async () => {
+      dbServiceMock.db = buildMockDb([
+        [mockGuestA],
+        [{ guestId: 'guest-uuid-1', phone: '541100000099' }],
+        [EVENT_ROW],
+        [USER_ROW],
+      ]);
+      whatsappClientMock.sendWithResult.mockImplementation((phone: string) =>
+        phone === '541100000001'
+          ? Promise.resolve({ ok: false, reason: SendFailureReason.WINDOW_CLOSED, graphCode: 131047 })
+          : Promise.resolve({ ok: true }),
+      );
+
+      const result = await service.notifySelected('event-uuid-1', ['guest-uuid-1']);
+
+      expect(whatsappClientMock.sendWithResult).toHaveBeenCalledTimes(2);
+      expect(result.sentCount).toBe(1);
+      expect(result.failedCount).toBe(0);
+      expect(result.recipients).toEqual([
+        { id: 'guest-uuid-1', name: 'Alice', phone: '541100000001', status: 'sent' },
+      ]);
+      expect(dbServiceMock.db.update).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports "sent" when the primary SUCCEEDS but an additional FAILS (partial failure hidden by design)', async () => {
+      dbServiceMock.db = buildMockDb([
+        [mockGuestA],
+        [{ guestId: 'guest-uuid-1', phone: '541100000099' }],
+        [EVENT_ROW],
+        [USER_ROW],
+      ]);
+      whatsappClientMock.sendWithResult.mockImplementation((phone: string) =>
+        phone === '541100000001'
+          ? Promise.resolve({ ok: true })
+          : Promise.resolve({ ok: false, reason: SendFailureReason.UNKNOWN }),
+      );
+
+      const result = await service.notifySelected('event-uuid-1', ['guest-uuid-1']);
+
+      expect(result.sentCount).toBe(1);
+      expect(result.failedCount).toBe(0);
+      expect(result.recipients[0]).toMatchObject({ id: 'guest-uuid-1', status: 'sent' });
+    });
+
+    it('behaves exactly as today for a guest with NO additional phones — a single send, single outcome', async () => {
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
+      whatsappClientMock.sendWithResult.mockResolvedValue({ ok: true });
+
+      const result = await service.notifySelected('event-uuid-1', ['guest-uuid-1']);
+
+      expect(whatsappClientMock.sendWithResult).toHaveBeenCalledTimes(1);
+      expect(result.recipients).toEqual([
+        { id: 'guest-uuid-1', name: 'Alice', phone: '541100000001', status: 'sent' },
+      ]);
+    });
+
+    it('skips a guest with an empty primary and no valid additional numbers, WITHOUT attempting a send', async () => {
+      const noPhone = { ...mockGuestA, id: 'guest-uuid-3', name: 'Nadie', phone: '' };
+      dbServiceMock.db = buildMockDb([[noPhone], [], [EVENT_ROW], [USER_ROW]]);
+
+      const result = await service.notifySelected('event-uuid-1', ['guest-uuid-3']);
+
+      expect(whatsappClientMock.sendWithResult).not.toHaveBeenCalled();
+      expect(result.skippedCount).toBe(1);
+      expect(result.recipients).toEqual([
+        {
+          id: 'guest-uuid-3',
+          name: 'Nadie',
+          phone: '',
+          status: 'skipped',
+          reason: SendFailureReason.INVALID_PHONE,
+        },
+      ]);
+    });
+
+    it('aggregates counts PER-GUEST across a mixed batch (sent / skipped / failed)', async () => {
+      const sender = { ...mockGuestA, id: 'g-sent', name: 'Sent', phone: '541100000001' };
+      const skipper = { ...mockGuestA, id: 'g-skip', name: 'Skip', phone: '' };
+      const failer = { ...mockGuestA, id: 'g-fail', name: 'Fail', phone: '541100000005' };
+      dbServiceMock.db = buildMockDb([
+        [sender, skipper, failer],
+        [{ guestId: 'g-sent', phone: '541100000002' }],
+        [EVENT_ROW],
+        [USER_ROW],
+      ]);
+      whatsappClientMock.sendWithResult.mockImplementation((phone: string) =>
+        phone === '541100000005'
+          ? Promise.resolve({ ok: false, reason: SendFailureReason.WINDOW_CLOSED, graphCode: 131047 })
+          : Promise.resolve({ ok: true }),
+      );
+
+      const result = await service.notifySelected('event-uuid-1', ['g-sent', 'g-skip', 'g-fail']);
+
+      expect(result.notifiedCount).toBe(3);
+      expect(result.sentCount).toBe(1);
+      expect(result.skippedCount).toBe(1);
+      expect(result.failedCount).toBe(1);
+      // sender: primary + 1 additional = 2 sends; failer: 1 send; skipper: 0 sends.
+      expect(whatsappClientMock.sendWithResult).toHaveBeenCalledTimes(3);
+      expect(result.recipients).toContainEqual({
+        id: 'g-sent',
+        name: 'Sent',
+        phone: '541100000001',
+        status: 'sent',
+      });
+      expect(result.recipients).toContainEqual({
+        id: 'g-skip',
+        name: 'Skip',
+        phone: '',
+        status: 'skipped',
+        reason: SendFailureReason.INVALID_PHONE,
+      });
+      expect(result.recipients).toContainEqual({
+        id: 'g-fail',
+        name: 'Fail',
+        phone: '541100000005',
+        status: 'failed',
+        reason: SendFailureReason.WINDOW_CLOSED,
+        graphCode: 131047,
+      });
     });
   });
 
