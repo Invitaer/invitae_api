@@ -3,8 +3,13 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { DatabaseService } from '../database/database.service';
 import { guests, Guest, RsvpStatus, events, users, guestPhones } from '../database/schema';
 import { buildGuestFilter } from '../admin/guests/guest-filter';
-import { WhatsappClient, SendFailureReason } from '../whatsapp/whatsapp.client';
+import { WhatsappClient, SendFailureReason, SendOutcome } from '../whatsapp/whatsapp.client';
 import { normalizeWhatsappRecipient } from '../whatsapp/phone.util';
+import {
+  DEFAULT_INVITE_MESSAGE,
+  GUEST_INVITE_TEMPLATE_LANG,
+  GUEST_INVITE_TEMPLATE_NAME,
+} from '../whatsapp/guest-invite-template.const';
 
 /** A recipient guest plus every extra number registered in `guest_phones`. */
 type GuestWithPhones = Guest & { additionalPhones: string[] };
@@ -161,7 +166,7 @@ export class NotificationsService {
       let firstHardFailure: { reason: SendFailureReason; graphCode?: number } | undefined;
 
       for (const number of targets) {
-        const outcome = await this.whatsappClient.sendWithResult(number, body, buttons);
+        const outcome = await this.sendInvitation(number, body, buttons, guest, inviterName);
 
         if (outcome.ok) {
           anySent = true;
@@ -206,6 +211,38 @@ export class NotificationsService {
       skippedCount,
       recipients: outcomes,
     };
+  }
+
+  /**
+   * Sends ONE invitation to ONE number: free-form first, approved template
+   * ONLY when Graph reports the 24h customer service window is closed
+   * (`131047`) — a cold guest who never messaged the bot. Any other failure
+   * is returned as-is: `MARKETING_THROTTLED` means "wait", `INVALID_PHONE`
+   * means "fix the number", and neither is helped by a template.
+   *
+   * The template result REPLACES the free-form result, so the caller still
+   * sees exactly one outcome per number (and therefore one per guest).
+   */
+  private async sendInvitation(
+    number: string,
+    body: string,
+    buttons: { id: string; title: string }[],
+    guest: GuestWithPhones,
+    inviterName: string,
+  ): Promise<SendOutcome> {
+    const freeForm = await this.whatsappClient.sendWithResult(number, body, buttons);
+
+    if (freeForm.ok || freeForm.reason !== SendFailureReason.WINDOW_CLOSED) {
+      return freeForm;
+    }
+
+    return this.whatsappClient.sendTemplateWithResult(
+      number,
+      GUEST_INVITE_TEMPLATE_NAME,
+      GUEST_INVITE_TEMPLATE_LANG,
+      [guest.name, inviterName, DEFAULT_INVITE_MESSAGE],
+      [`guest_rsvp_yes:${guest.id}`, `guest_rsvp_no:${guest.id}`],
+    );
   }
 
   /**
