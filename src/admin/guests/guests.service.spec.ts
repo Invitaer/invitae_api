@@ -164,6 +164,24 @@ describe('GuestsService (eventId scoping)', () => {
     });
   });
 
+  describe('findByIdUnscoped', () => {
+    it('returns the guest matching the id, with NO event filter applied', async () => {
+      dbServiceMock.db = buildMockDb([MOCK_GUEST_E1]);
+
+      const result = await service.findByIdUnscoped('guest-uuid-1');
+
+      expect(result).toEqual(expect.objectContaining(MOCK_GUEST_E1));
+    });
+
+    it('returns undefined (no throw) when no guest matches the id', async () => {
+      dbServiceMock.db = buildMockDb([]);
+
+      const result = await service.findByIdUnscoped('nonexistent-id');
+
+      expect(result).toBeUndefined();
+    });
+  });
+
   describe('update', () => {
     it('updates guest scoped to eventId and returns updated guest', async () => {
       const updated = { ...MOCK_GUEST_E1, name: 'Alice Updated' };
