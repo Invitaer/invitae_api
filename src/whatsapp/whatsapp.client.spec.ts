@@ -6,7 +6,7 @@ jest.mock('../config/secrets', () => ({
   },
 }));
 
-import { WhatsappClient } from './whatsapp.client';
+import { WhatsappClient, SendFailureReason } from './whatsapp.client';
 
 describe('WhatsappClient', () => {
   let client: WhatsappClient;
@@ -66,6 +66,100 @@ describe('WhatsappClient', () => {
       await expect(
         client.sendText('+5491100000000', 'hola'),
       ).resolves.toBeUndefined();
+    });
+  });
+
+  describe('sendWithResult', () => {
+    const BUTTONS = [
+      { id: 'guest_rsvp_yes:guest-1', title: 'Asistire' },
+      { id: 'guest_rsvp_no:guest-1', title: 'No podre asistir' },
+    ];
+
+    it('returns ok:true on a successful Graph API response', async () => {
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ messages: [{ id: 'wamid.abc' }] }),
+      } as Response);
+
+      const outcome = await client.sendWithResult(
+        '+5491100000000',
+        'Hola, confirmas tu asistencia?',
+        BUTTONS,
+      );
+
+      expect(outcome).toEqual({ ok: true, messageId: 'wamid.abc' });
+    });
+
+    it('maps Graph error code 131047 to SendFailureReason.WINDOW_CLOSED', async () => {
+      fetchSpy.mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({ error: { code: 131047, message: 'window closed' } }),
+      } as Response);
+
+      const outcome = await client.sendWithResult('+5491100000000', 'body', BUTTONS);
+
+      expect(outcome).toEqual({
+        ok: false,
+        reason: SendFailureReason.WINDOW_CLOSED,
+        graphCode: 131047,
+      });
+    });
+
+    it('maps Graph error code 131049 to SendFailureReason.MARKETING_THROTTLED (distinct from 131047)', async () => {
+      fetchSpy.mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({ error: { code: 131049, message: 'throttled' } }),
+      } as Response);
+
+      const outcome = await client.sendWithResult('+5491100000000', 'body', BUTTONS);
+
+      expect(outcome).toEqual({
+        ok: false,
+        reason: SendFailureReason.MARKETING_THROTTLED,
+        graphCode: 131049,
+      });
+      expect(outcome).not.toMatchObject({ reason: SendFailureReason.WINDOW_CLOSED });
+    });
+
+    it('maps any other Graph error code to SendFailureReason.UNKNOWN', async () => {
+      fetchSpy.mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({ error: { code: 100, message: 'bad request' } }),
+      } as Response);
+
+      const outcome = await client.sendWithResult('+5491100000000', 'body', BUTTONS);
+
+      expect(outcome).toEqual({
+        ok: false,
+        reason: SendFailureReason.UNKNOWN,
+        graphCode: 100,
+      });
+    });
+
+    it('returns SendFailureReason.INVALID_PHONE for an empty phone WITHOUT calling fetch', async () => {
+      const outcome = await client.sendWithResult('', 'body', BUTTONS);
+
+      expect(outcome).toEqual({ ok: false, reason: SendFailureReason.INVALID_PHONE });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('returns SendFailureReason.INVALID_PHONE for a malformed (too-short) phone WITHOUT calling fetch', async () => {
+      const outcome = await client.sendWithResult('123', 'body', BUTTONS);
+
+      expect(outcome).toEqual({ ok: false, reason: SendFailureReason.INVALID_PHONE });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('returns SendFailureReason.TRANSPORT when the fetch call itself throws (network failure)', async () => {
+      fetchSpy.mockRejectedValue(new Error('network down'));
+
+      const outcome = await client.sendWithResult('+5491100000000', 'body', BUTTONS);
+
+      expect(outcome).toEqual({ ok: false, reason: SendFailureReason.TRANSPORT });
     });
   });
 });

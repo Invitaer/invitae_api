@@ -18,7 +18,11 @@ jest.mock('../admin/guests/guests.service');
 
 import { Logger, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { EVENT_CONFIRM_STALE_MS, WhatsappService } from './whatsapp.service';
+import {
+  EVENT_CONFIRM_STALE_MS,
+  WhatsappService,
+  extractInteractiveId,
+} from './whatsapp.service';
 import { parseCommand } from './command.parser';
 import { RedisService } from '../redis/redis.service';
 import { WhatsappLinkService } from './whatsapp-link.service';
@@ -88,6 +92,34 @@ function mockRedisSetNX(
   );
 }
 
+describe('extractInteractiveId', () => {
+  it('reads interactive.button_reply.id when the inbound shape is type:"interactive"', () => {
+    expect(
+      extractInteractiveId({
+        id: 'm1',
+        from: '+5491100000000',
+        type: 'interactive',
+        interactive: { button_reply: { id: 'guest_rsvp_yes:abc', title: 'Si' } },
+      }),
+    ).toBe('guest_rsvp_yes:abc');
+  });
+
+  it('reads button.payload when the inbound shape is type:"button" (template quick-reply)', () => {
+    expect(
+      extractInteractiveId({
+        id: 'm2',
+        from: '+5491100000000',
+        type: 'button',
+        button: { payload: 'guest_rsvp_no:abc', text: 'No' },
+      }),
+    ).toBe('guest_rsvp_no:abc');
+  });
+
+  it('returns undefined when neither interactive nor button is present', () => {
+    expect(extractInteractiveId({ id: 'm3', from: '+5491100000000' })).toBeUndefined();
+  });
+});
+
 describe('WhatsappService', () => {
   let service: WhatsappService;
   let redisServiceMock: { setNX: jest.Mock; del: jest.Mock; delIfEquals: jest.Mock };
@@ -109,6 +141,7 @@ describe('WhatsappService', () => {
     findAllPaginated: jest.Mock;
     create: jest.Mock;
     update: jest.Mock;
+    findByIdUnscoped: jest.Mock;
   };
 
   const USER_ID = 'user-uuid-1';
@@ -135,6 +168,7 @@ describe('WhatsappService', () => {
       findAllPaginated: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
+      findByIdUnscoped: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -1570,6 +1604,152 @@ describe('WhatsappService', () => {
         expect.stringContaining('Menu principal'),
         expect.anything(),
       );
+    });
+  });
+
+  describe('guest RSVP inbound guard', () => {
+    const GUEST_ID = '11111111-1111-4111-8111-111111111111';
+    const GUEST_PHONE = '+5491100005555';
+
+    beforeEach(() => {
+      mockRedisSetNX(redisServiceMock.setNX);
+    });
+
+    it('an interactive button tap (guest_rsvp_yes) sets ACCEPTED, replies, and NEVER resolves the phone', async () => {
+      guestsServiceMock.findByIdUnscoped.mockResolvedValue({
+        id: GUEST_ID,
+        eventId: EVENT_ID,
+        rsvpStatus: 'PENDING',
+      });
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-guest-yes', GUEST_PHONE, `guest_rsvp_yes:${GUEST_ID}`, 'button_reply'),
+      );
+
+      expect(guestsServiceMock.update).toHaveBeenCalledWith(EVENT_ID, GUEST_ID, {
+        rsvpStatus: 'ACCEPTED',
+      });
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(GUEST_PHONE, expect.any(String));
+      expect(whatsappLinkServiceMock.resolvePhone).not.toHaveBeenCalled();
+      expect(conversationStoreMock.get).not.toHaveBeenCalled();
+    });
+
+    it('a type:"button" tap (button.payload) sets DECLINED, identical to the interactive-shape path', async () => {
+      guestsServiceMock.findByIdUnscoped.mockResolvedValue({
+        id: GUEST_ID,
+        eventId: EVENT_ID,
+        rsvpStatus: 'PENDING',
+      });
+
+      const payload = {
+        entry: [
+          {
+            changes: [
+              {
+                value: {
+                  messages: [
+                    {
+                      id: 'm-guest-no-btn',
+                      from: GUEST_PHONE,
+                      type: 'button',
+                      button: { payload: `guest_rsvp_no:${GUEST_ID}`, text: 'No podre asistir' },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      await service.handleIncoming(payload);
+
+      expect(guestsServiceMock.update).toHaveBeenCalledWith(EVENT_ID, GUEST_ID, {
+        rsvpStatus: 'DECLINED',
+      });
+      expect(whatsappLinkServiceMock.resolvePhone).not.toHaveBeenCalled();
+    });
+
+    it('a tap OVERWRITES an organizer-set ACCEPTED status, with no lock or rejection', async () => {
+      guestsServiceMock.findByIdUnscoped.mockResolvedValue({
+        id: GUEST_ID,
+        eventId: EVENT_ID,
+        rsvpStatus: 'ACCEPTED', // set previously by an organizer via dashboard CRUD
+      });
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-guest-overwrite', GUEST_PHONE, `guest_rsvp_no:${GUEST_ID}`, 'button_reply'),
+      );
+
+      expect(guestsServiceMock.update).toHaveBeenCalledWith(EVENT_ID, GUEST_ID, {
+        rsvpStatus: 'DECLINED',
+      });
+    });
+
+    it('a repeat identical tap is a single idempotent write with a single reply', async () => {
+      guestsServiceMock.findByIdUnscoped.mockResolvedValue({
+        id: GUEST_ID,
+        eventId: EVENT_ID,
+        rsvpStatus: 'ACCEPTED', // already recorded from a prior tap
+      });
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-guest-repeat', GUEST_PHONE, `guest_rsvp_yes:${GUEST_ID}`, 'button_reply'),
+      );
+
+      expect(guestsServiceMock.update).toHaveBeenCalledTimes(1);
+      expect(whatsappClientMock.sendText).toHaveBeenCalledTimes(1);
+    });
+
+    it('a stale/unknown guestId replies neutrally without throwing or writing', async () => {
+      guestsServiceMock.findByIdUnscoped.mockResolvedValue(undefined);
+
+      await expect(
+        service.handleIncoming(
+          buildInteractivePayload('m-guest-gone', GUEST_PHONE, `guest_rsvp_yes:${GUEST_ID}`, 'button_reply'),
+        ),
+      ).resolves.toBeUndefined();
+
+      expect(guestsServiceMock.update).not.toHaveBeenCalled();
+      expect(whatsappClientMock.sendText).toHaveBeenCalledWith(
+        GUEST_PHONE,
+        expect.stringContaining('ya no esta disponible'),
+      );
+    });
+
+    it('a duplicate wamid (SETNX dedup already claimed) never reaches the guest guard', async () => {
+      mockRedisSetNX(redisServiceMock.setNX, { msgId: false });
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-guest-dup', GUEST_PHONE, `guest_rsvp_yes:${GUEST_ID}`, 'button_reply'),
+      );
+
+      expect(guestsServiceMock.findByIdUnscoped).not.toHaveBeenCalled();
+      expect(guestsServiceMock.update).not.toHaveBeenCalled();
+    });
+
+    it('an organizer "confirmar:{id}" tap still reaches resolvePhone unchanged (no namespace collision)', async () => {
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID, currentEventId: EVENT_ID });
+      userEventsServiceMock.findOne.mockResolvedValue({ id: EVENT_ID, name: 'My Wedding' });
+
+      await service.handleIncoming(
+        buildInteractivePayload('m-organizer-confirmar', PHONE, 'confirmar:guest-uuid-9', 'button_reply'),
+      );
+
+      expect(whatsappLinkServiceMock.resolvePhone).toHaveBeenCalledWith(PHONE);
+      expect(guestsServiceMock.findByIdUnscoped).not.toHaveBeenCalled();
+      expect(guestsServiceMock.update).toHaveBeenCalledWith(EVENT_ID, 'guest-uuid-9', {
+        rsvpStatus: 'ACCEPTED',
+      });
+    });
+
+    it('plain organizer text still reaches resolvePhone unchanged (no namespace collision)', async () => {
+      conversationStoreMock.get.mockResolvedValue({ userId: USER_ID });
+
+      await service.handleIncoming(buildPayload('m-organizer-text', PHONE, 'menu'));
+
+      expect(whatsappLinkServiceMock.resolvePhone).toHaveBeenCalledWith(PHONE);
+      expect(guestsServiceMock.findByIdUnscoped).not.toHaveBeenCalled();
     });
   });
 });

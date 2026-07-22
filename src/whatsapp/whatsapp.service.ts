@@ -2,7 +2,7 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { CreateGuestDto } from '../admin/guests/dto/create-guest.dto';
 import { UpdateGuestDto } from '../admin/guests/dto/update-guest.dto';
 import { GuestsService } from '../admin/guests/guests.service';
-import { Event } from '../database/schema';
+import { Event, RsvpStatus } from '../database/schema';
 import { RedisService } from '../redis/redis.service';
 import { UserEventsService } from '../user/events/user-events.service';
 import { BotIntent, RsvpFilterStatus } from './bot-intent';
@@ -17,6 +17,7 @@ import {
 import { WhatsappLinkService } from './whatsapp-link.service';
 import { WhatsappReply, buttonsReply, listReply, textReply } from './whatsapp-reply';
 import { WhatsappClient } from './whatsapp.client';
+import { GuestRsvpMatch, parseGuestRsvp } from './guest-rsvp.parser';
 
 export interface WhatsappWebhookPayload {
   entry?: Array<{
@@ -25,25 +26,46 @@ export interface WhatsappWebhookPayload {
         messages?: Array<{
           id: string;
           from: string;
+          type?: string;
           text?: { body: string };
           interactive?: {
             button_reply?: { id: string; title: string };
             list_reply?: { id: string; title: string };
           };
+          button?: { payload: string; text: string };
         }>;
       };
     }>;
   }>;
 }
 
-interface WhatsappMessage {
+export interface WhatsappMessage {
   id: string;
   from: string;
+  type?: string;
   text?: { body: string };
   interactive?: {
     button_reply?: { id: string; title: string };
     list_reply?: { id: string; title: string };
   };
+  button?: { payload: string; text: string };
+}
+
+/**
+ * Single normalization point for BOTH inbound interactive-reply shapes Meta
+ * documents separately: a free-form interactive button (`type:"interactive"`,
+ * `interactive.button_reply.id`) and a TEMPLATE quick-reply button
+ * (`type:"button"`, `button.payload`). A handler that only inspected
+ * `interactive.button_reply` would silently drop every template button tap.
+ * Precedence (interactive before button) is fixed because the two shapes are
+ * mutually exclusive in practice — see `sdd/guest-whatsapp-notify/design` D3.
+ */
+export function extractInteractiveId(message: WhatsappMessage): string | undefined {
+  return (
+    message.interactive?.button_reply?.id ??
+    message.interactive?.list_reply?.id ??
+    message.button?.payload
+  );
 }
 
 const MESSAGE_ID_TTL_SECONDS = 86400; // 24h — enough to cover Meta's retry window
@@ -139,6 +161,21 @@ export class WhatsappService {
         return;
       }
 
+      // Guest RSVP button taps are recognized and handled here, BEFORE phone
+      // resolution: a guest phone is never in `whatsapp_links`, so falling
+      // through to `resolvePhone` would hit the PIN-linking reply and
+      // silently discard the tap. This branch never touches
+      // `ConversationStore`, the flow machine, or organizer state — it always
+      // `return`s, so every existing organizer bot path is unaffected by
+      // construction. See `sdd/guest-whatsapp-notify/design` decision D2.
+      const guardInteractiveId = extractInteractiveId(message);
+      const guestRsvpMatch = guardInteractiveId ? parseGuestRsvp(guardInteractiveId) : undefined;
+      if (guestRsvpMatch) {
+        const guestReply = await this.handleGuestRsvpTap(guestRsvpMatch);
+        await this.sendReply(phoneNumber, guestReply);
+        return;
+      }
+
       const text = message.text?.body?.trim() ?? '';
 
       // Resolve the phone BEFORE any OTP handling. A 6-digit text is only an
@@ -185,8 +222,7 @@ export class WhatsappService {
       }
       const ctx: ConversationContext = stored && !isStoredContextStale ? stored : { userId };
 
-      const interactiveId =
-        message.interactive?.button_reply?.id ?? message.interactive?.list_reply?.id;
+      const interactiveId = extractInteractiveId(message);
       const intent = parseCommand({ text, interactiveId });
 
       // While a write-flow is active, almost everything the user types is step
@@ -868,5 +904,32 @@ export class WhatsappService {
 
   private extractMessage(payload: WhatsappWebhookPayload): WhatsappMessage | undefined {
     return payload?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+  }
+
+  /**
+   * Handles a matched guest RSVP button tap. The write is scoped by
+   * `guestId` alone — the id was only ever sent to that guest's number, the
+   * same trust model the existing public `POST /invitae/confirm` already
+   * uses. Last-write-wins: a guest tap overwrites ANY current `rsvpStatus`,
+   * including a non-PENDING one set by an organizer, with no precedence
+   * check (`sdd/guest-whatsapp-notify/spec` — Superseded Decision).
+   */
+  private async handleGuestRsvpTap(match: GuestRsvpMatch): Promise<WhatsappReply> {
+    const guest = await this.guestsService.findByIdUnscoped(match.guestId);
+    if (!guest) {
+      // Deliberately neutral: never discloses whether the guestId ever
+      // existed (stale button on a deleted guest/event).
+      return textReply('Esta invitacion ya no esta disponible.');
+    }
+
+    await this.guestsService.update(guest.eventId, guest.id, {
+      rsvpStatus: match.status as RsvpStatus,
+    });
+
+    return textReply(
+      match.status === 'ACCEPTED'
+        ? 'Gracias, confirmamos tu asistencia.'
+        : 'Gracias por avisarnos, lamentamos que no puedas asistir.',
+    );
   }
 }
