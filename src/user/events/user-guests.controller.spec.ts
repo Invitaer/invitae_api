@@ -69,11 +69,15 @@ const mockGuestsService = {
 
 // --- Mock NotificationsService ---
 
+// Opaque stand-in: the controller only forwards whatever the service returns,
+// so this fixture asserts pass-through, not the notification contract itself.
 const MOCK_NOTIFY_RESULT = {
-  status: 'mock',
-  pending: true,
+  delivery: 'live',
   notifiedCount: 1,
-  recipients: [{ id: 'guest-uuid-1', name: 'Alice', phone: '123456789' }],
+  sentCount: 1,
+  failedCount: 0,
+  skippedCount: 0,
+  recipients: [{ id: 'guest-uuid-1', name: 'Alice', phone: '123456789', status: 'sent' }],
 };
 
 const mockNotificationsService = {
@@ -271,7 +275,7 @@ describe('UserGuestsController — member access', () => {
         .send({ guestIds: ['11111111-1111-4111-8111-111111111111'] })
         .expect(200);
 
-      expect(response.body).toMatchObject({ status: 'mock', pending: true });
+      expect(response.body).toMatchObject({ delivery: 'live', sentCount: 1 });
       expect(mockNotificationsService.notifySelected).toHaveBeenCalledWith(
         'event-uuid-1',
         ['11111111-1111-4111-8111-111111111111'],
@@ -303,7 +307,7 @@ describe('UserGuestsController — member access', () => {
         .post('/user/events/event-uuid-1/guests/notify-all')
         .expect(200);
 
-      expect(response.body).toMatchObject({ status: 'mock', pending: true });
+      expect(response.body).toMatchObject({ delivery: 'live', sentCount: 1 });
       expect(mockNotificationsService.notifyAll).toHaveBeenCalledWith(
         'event-uuid-1',
         undefined,
@@ -337,7 +341,7 @@ describe('UserGuestsController — member access', () => {
         .post('/user/events/event-uuid-1/guests/notify-pending')
         .expect(200);
 
-      expect(response.body).toMatchObject({ status: 'mock', pending: true });
+      expect(response.body).toMatchObject({ delivery: 'live', sentCount: 1 });
       expect(mockNotificationsService.notifyPending).toHaveBeenCalledWith(
         'event-uuid-1',
         undefined,

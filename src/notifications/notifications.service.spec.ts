@@ -7,6 +7,7 @@ jest.mock('../config/secrets', () => ({
 }));
 jest.mock('../database/database.service');
 
+import { Logger } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { DatabaseService } from '../database/database.service';
 import { SendFailureReason, WhatsappClient } from '../whatsapp/whatsapp.client';
@@ -122,6 +123,7 @@ describe('NotificationsService', () => {
 
       expect(result).toEqual({
         delivery: 'live',
+        allSent: true,
         notifiedCount: 0,
         sentCount: 0,
         failedCount: 0,
@@ -596,36 +598,76 @@ describe('NotificationsService', () => {
     });
   });
 
-  describe('notifyAll (delivery: "mock" — real delivery out of scope for this slice)', () => {
-    it('returns delivery:"mock" for every guest of the event (no search)', async () => {
-      dbServiceMock.db = buildMockDb([[mockGuestA, mockGuestB]]);
+  describe('notifyAll — real per-recipient send (delivery: "live")', () => {
+    beforeEach(() => {
+      whatsappClientMock.sendWithResult.mockResolvedValue({ ok: true, messageId: 'wamid.1' });
+    });
+
+    it('sends a real message to every guest of the event (no search)', async () => {
+      dbServiceMock.db = buildMockDb([[mockGuestA, mockGuestB], [], [EVENT_ROW], [USER_ROW]]);
 
       const result = await service.notifyAll('event-uuid-1');
 
-      expect(result.delivery).toBe('mock');
+      expect(result.delivery).toBe('live');
       expect(result.notifiedCount).toBe(2);
-      expect(result.sentCount).toBe(0);
+      expect(result.sentCount).toBe(2);
+      expect(result.failedCount).toBe(0);
+      expect(whatsappClientMock.sendWithResult).toHaveBeenCalledTimes(2);
+      const dialed = whatsappClientMock.sendWithResult.mock.calls.map(([p]) => p);
+      expect(dialed).toEqual(['541100000001', '541100000002']);
+    });
+
+    it('fans out to the additional phones of each recipient', async () => {
+      dbServiceMock.db = buildMockDb([
+        [mockGuestA],
+        [{ guestId: 'guest-uuid-1', phone: '541100000099' }],
+        [EVENT_ROW],
+        [USER_ROW],
+      ]);
+
+      const result = await service.notifyAll('event-uuid-1');
+
+      const dialed = whatsappClientMock.sendWithResult.mock.calls.map(([p]) => p);
+      expect(dialed).toEqual(['541100000001', '541100000099']);
+      expect(result.sentCount).toBe(1);
+      expect(result.recipients).toHaveLength(1);
+    });
+
+    it('short-circuits without sending when no guest matches', async () => {
+      dbServiceMock.db = buildMockDb([[]]);
+
+      const result = await service.notifyAll('event-uuid-1', 'nobody');
+
+      expect(result).toEqual({
+        delivery: 'live',
+        allSent: true,
+        notifiedCount: 0,
+        sentCount: 0,
+        failedCount: 0,
+        skippedCount: 0,
+        recipients: [],
+      });
       expect(dbServiceMock.db.select).toHaveBeenCalledTimes(1);
       expect(whatsappClientMock.sendWithResult).not.toHaveBeenCalled();
     });
 
     it('applies the search filter when provided, notifying only matching guests', async () => {
-      dbServiceMock.db = buildMockDb([[mockGuestA]]);
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
 
       const result = await service.notifyAll('event-uuid-1', 'alice');
 
       expect(result.notifiedCount).toBe(1);
       expect(result.recipients).toEqual([
-        { id: 'guest-uuid-1', name: 'Alice', phone: '541100000001', status: 'skipped' },
+        { id: 'guest-uuid-1', name: 'Alice', phone: '541100000001', status: 'sent' },
       ]);
     });
 
     it('produces a DIFFERENT where condition with search vs without (proves the filter is really applied, not dropped)', async () => {
-      dbServiceMock.db = buildMockDb([[mockGuestA]]);
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
       await service.notifyAll('event-uuid-1');
       const conditionWithoutSearch = dbServiceMock.db._internals.whereFns[0].mock.calls[0][0];
 
-      dbServiceMock.db = buildMockDb([[mockGuestA]]);
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
       await service.notifyAll('event-uuid-1', 'alice');
       const conditionWithSearch = dbServiceMock.db._internals.whereFns[0].mock.calls[0][0];
 
@@ -633,37 +675,158 @@ describe('NotificationsService', () => {
     });
   });
 
-  describe('notifyPending (delivery: "mock" — real delivery out of scope for this slice)', () => {
-    it('returns delivery:"mock" scoped to pending guests (no search)', async () => {
-      dbServiceMock.db = buildMockDb([[mockGuestA]]);
+  describe('notifyPending — real per-recipient send (delivery: "live")', () => {
+    beforeEach(() => {
+      whatsappClientMock.sendWithResult.mockResolvedValue({ ok: true, messageId: 'wamid.1' });
+    });
+
+    it('sends only to pending guests (no search)', async () => {
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
 
       const result = await service.notifyPending('event-uuid-1');
 
-      expect(result).toMatchObject({ delivery: 'mock', notifiedCount: 1 });
+      expect(result).toMatchObject({ delivery: 'live', notifiedCount: 1, sentCount: 1 });
+      expect(whatsappClientMock.sendWithResult).toHaveBeenCalledTimes(1);
       expect(dbServiceMock.db._internals.whereFns[0]).toHaveBeenCalledTimes(1);
     });
 
     it('combines the search filter with the PENDING restriction', async () => {
-      dbServiceMock.db = buildMockDb([[mockGuestA]]);
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
 
       const result = await service.notifyPending('event-uuid-1', 'alice');
 
       expect(result.notifiedCount).toBe(1);
       expect(result.recipients).toEqual([
-        { id: 'guest-uuid-1', name: 'Alice', phone: '541100000001', status: 'skipped' },
+        { id: 'guest-uuid-1', name: 'Alice', phone: '541100000001', status: 'sent' },
       ]);
     });
 
+    it('falls back to the approved template when the 24h window is closed', async () => {
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
+      whatsappClientMock.sendWithResult.mockResolvedValue({
+        ok: false,
+        reason: SendFailureReason.WINDOW_CLOSED,
+        graphCode: 131047,
+      });
+      whatsappClientMock.sendTemplateWithResult.mockResolvedValue({ ok: true });
+
+      const result = await service.notifyPending('event-uuid-1');
+
+      expect(whatsappClientMock.sendTemplateWithResult).toHaveBeenCalledTimes(1);
+      expect(result.sentCount).toBe(1);
+    });
+
+    it('short-circuits without sending when no pending guest matches', async () => {
+      dbServiceMock.db = buildMockDb([[]]);
+
+      const result = await service.notifyPending('event-uuid-1');
+
+      expect(result.notifiedCount).toBe(0);
+      expect(dbServiceMock.db.select).toHaveBeenCalledTimes(1);
+      expect(whatsappClientMock.sendWithResult).not.toHaveBeenCalled();
+    });
+
     it('produces a DIFFERENT where condition for notifyPending with search vs without (proves the filter is really applied)', async () => {
-      dbServiceMock.db = buildMockDb([[mockGuestA]]);
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
       await service.notifyPending('event-uuid-1');
       const conditionWithoutSearch = dbServiceMock.db._internals.whereFns[0].mock.calls[0][0];
 
-      dbServiceMock.db = buildMockDb([[mockGuestA]]);
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
       await service.notifyPending('event-uuid-1', 'alice');
       const conditionWithSearch = dbServiceMock.db._internals.whereFns[0].mock.calls[0][0];
 
       expect(conditionWithSearch).not.toEqual(conditionWithoutSearch);
+    });
+  });
+
+  describe('allSent — one-field delivery signal for the dashboard', () => {
+    it('is true when every recipient was sent', async () => {
+      dbServiceMock.db = buildMockDb([[mockGuestA, mockGuestB], [], [EVENT_ROW], [USER_ROW]]);
+      whatsappClientMock.sendWithResult.mockResolvedValue({ ok: true, messageId: 'wamid.1' });
+
+      const result = await service.notifySelected('event-uuid-1', ['guest-uuid-1', 'guest-uuid-2']);
+
+      expect(result.sentCount).toBe(2);
+      expect(result.allSent).toBe(true);
+    });
+
+    it('is false when at least one recipient failed', async () => {
+      dbServiceMock.db = buildMockDb([[mockGuestA, mockGuestB], [], [EVENT_ROW], [USER_ROW]]);
+      whatsappClientMock.sendWithResult
+        .mockResolvedValueOnce({ ok: true, messageId: 'wamid.1' })
+        .mockResolvedValueOnce({
+          ok: false,
+          reason: SendFailureReason.MARKETING_THROTTLED,
+          graphCode: 131049,
+        });
+
+      const result = await service.notifySelected('event-uuid-1', ['guest-uuid-1', 'guest-uuid-2']);
+
+      expect(result.failedCount).toBe(1);
+      expect(result.allSent).toBe(false);
+    });
+
+    it('is false when a recipient was skipped (no valid number)', async () => {
+      const noPhoneGuest = { ...mockGuestA, phone: '' };
+      dbServiceMock.db = buildMockDb([[noPhoneGuest], [], [EVENT_ROW], [USER_ROW]]);
+
+      const result = await service.notifySelected('event-uuid-1', ['guest-uuid-1']);
+
+      expect(result.skippedCount).toBe(1);
+      expect(result.allSent).toBe(false);
+    });
+  });
+
+  describe('dispatch logging — surfaces every non-sent recipient', () => {
+    let warnSpy: jest.SpyInstance;
+    let logSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      logSpy = jest.spyOn(Logger.prototype, 'log').mockImplementation();
+    });
+
+    afterEach(() => {
+      warnSpy.mockRestore();
+      logSpy.mockRestore();
+    });
+
+    it('warns once per non-sent recipient, naming the guest and the reason', async () => {
+      dbServiceMock.db = buildMockDb([[mockGuestA, mockGuestB], [], [EVENT_ROW], [USER_ROW]]);
+      whatsappClientMock.sendWithResult
+        .mockResolvedValueOnce({ ok: true, messageId: 'wamid.1' })
+        .mockResolvedValueOnce({
+          ok: false,
+          reason: SendFailureReason.MARKETING_THROTTLED,
+          graphCode: 131049,
+        });
+
+      await service.notifySelected('event-uuid-1', ['guest-uuid-1', 'guest-uuid-2']);
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const warned = warnSpy.mock.calls[0][0] as string;
+      expect(warned).toContain('guest-uuid-2');
+      expect(warned).toContain(SendFailureReason.MARKETING_THROTTLED);
+    });
+
+    it('does not warn when every recipient was sent', async () => {
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
+      whatsappClientMock.sendWithResult.mockResolvedValue({ ok: true, messageId: 'wamid.1' });
+
+      await service.notifySelected('event-uuid-1', ['guest-uuid-1']);
+
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it('logs a per-event summary with the sent/failed/skipped counts', async () => {
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
+      whatsappClientMock.sendWithResult.mockResolvedValue({ ok: true, messageId: 'wamid.1' });
+
+      await service.notifySelected('event-uuid-1', ['guest-uuid-1']);
+
+      const summary = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
+      expect(summary).toContain('event-uuid-1');
+      expect(summary).toMatch(/1 sent/);
     });
   });
 });

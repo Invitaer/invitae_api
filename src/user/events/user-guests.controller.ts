@@ -60,7 +60,7 @@ export class UserGuestsController {
     return this.guestsService.create(eventId, dto);
   }
 
-  // --- Notifications (mock — real delivery pending, see NotificationsService) ---
+  // --- Notifications (real WhatsApp delivery, see NotificationsService) ---
 
   @Post('notify')
   @HttpCode(HttpStatus.OK)
