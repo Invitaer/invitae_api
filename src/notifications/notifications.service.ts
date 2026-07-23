@@ -26,15 +26,19 @@ export interface RecipientOutcome {
 /**
  * Result of a notification dispatch.
  *
- * `delivery: 'live'` means a real WhatsApp send was attempted per recipient
- * (`notifySelected`). `delivery: 'mock'` means real delivery is NOT yet
- * implemented for this call (`notifyAll` / `notifyPending` — see
- * `sdd/guest-whatsapp-notify/design` decision D6 and the spec's Out of
- * Scope section); `notifiedCount`/`recipients` still resolve real data,
- * only the actual send is stubbed.
+ * `delivery` is always `'live'`: every entry point (`notifySelected`,
+ * `notifyAll`, `notifyPending`) attempts a real WhatsApp send per recipient.
+ * The field is kept — rather than dropped — because dashboard clients read
+ * it, and the earlier `'mock'` value is simply never produced anymore.
  */
 export interface NotificationResult {
-  delivery: 'live' | 'mock';
+  delivery: 'live';
+  /**
+   * True when every attempted recipient received the message
+   * (`sentCount === notifiedCount`). A one-field signal so the dashboard can
+   * decide whether to surface a delivery error without re-tallying counts.
+   */
+  allSent: boolean;
   notifiedCount: number;
   sentCount: number;
   failedCount: number;
@@ -56,32 +60,14 @@ export class NotificationsService {
    * WhatsApp interactive-button message per recipient (`delivery: 'live'`).
    */
   async notifySelected(eventId: string, guestIds: string[]): Promise<NotificationResult> {
-    if (guestIds.length === 0) return this.emptyResult('live');
+    if (guestIds.length === 0) return this.emptyResult();
 
     const recipients = await this.databaseService.db
       .select()
       .from(guests)
       .where(and(eq(guests.eventId, eventId), inArray(guests.id, guestIds)));
 
-    if (recipients.length === 0) return this.emptyResult('live');
-
-    const recipientIds = recipients.map((g) => g.id);
-    const phoneRows = await this.databaseService.db
-      .select()
-      .from(guestPhones)
-      .where(inArray(guestPhones.guestId, recipientIds));
-
-    const additionalByGuestId = phoneRows.reduce<Record<string, string[]>>((acc, row) => {
-      (acc[row.guestId] ??= []).push(row.phone);
-      return acc;
-    }, {});
-
-    const withPhones: GuestWithPhones[] = recipients.map((g) => ({
-      ...g,
-      additionalPhones: additionalByGuestId[g.id] ?? [],
-    }));
-
-    return this.dispatchLive(eventId, withPhones);
+    return this.dispatchLive(eventId, await this.hydratePhones(recipients));
   }
 
   /**
@@ -89,7 +75,7 @@ export class NotificationsService {
    * `search` is provided, only guests matching it (via the SAME filter used
    * by `GuestsService.findAllPaginated`/`findMatchingIds`) are notified. An
    * omitted `search` preserves the original "notify everyone" behavior.
-   * Real delivery is out of scope for this slice — see `NotificationResult`.
+   * Sends for real, exactly like `notifySelected` (`delivery: 'live'`).
    */
   async notifyAll(eventId: string, search?: string): Promise<NotificationResult> {
     const recipients = await this.databaseService.db
@@ -97,14 +83,14 @@ export class NotificationsService {
       .from(guests)
       .where(buildGuestFilter(eventId, search));
 
-    return this.dispatchMock(recipients);
+    return this.dispatchLive(eventId, await this.hydratePhones(recipients));
   }
 
   /**
    * Notify only guests whose RSVP status is still PENDING. Always applies
    * the PENDING restriction; `search` (via the SAME shared filter builder)
-   * additionally narrows the recipients. Real delivery is out of scope for
-   * this slice — see `NotificationResult`.
+   * additionally narrows the recipients. Sends for real, exactly like
+   * `notifySelected` (`delivery: 'live'`).
    */
   async notifyPending(eventId: string, search?: string): Promise<NotificationResult> {
     const recipients = await this.databaseService.db
@@ -117,7 +103,31 @@ export class NotificationsService {
         ),
       );
 
-    return this.dispatchMock(recipients);
+    return this.dispatchLive(eventId, await this.hydratePhones(recipients));
+  }
+
+  /**
+   * Attaches every number registered in `guest_phones` to its guest. Skips
+   * the query entirely for an empty recipient set so a filter that matches
+   * nobody costs exactly one round trip.
+   */
+  private async hydratePhones(recipients: Guest[]): Promise<GuestWithPhones[]> {
+    if (recipients.length === 0) return [];
+
+    const phoneRows = await this.databaseService.db
+      .select()
+      .from(guestPhones)
+      .where(inArray(guestPhones.guestId, recipients.map((g) => g.id)));
+
+    const additionalByGuestId = phoneRows.reduce<Record<string, string[]>>((acc, row) => {
+      (acc[row.guestId] ??= []).push(row.phone);
+      return acc;
+    }, {});
+
+    return recipients.map((g) => ({
+      ...g,
+      additionalPhones: additionalByGuestId[g.id] ?? [],
+    }));
   }
 
   /**
@@ -131,7 +141,7 @@ export class NotificationsService {
     eventId: string,
     recipients: GuestWithPhones[],
   ): Promise<NotificationResult> {
-    if (recipients.length === 0) return this.emptyResult('live');
+    if (recipients.length === 0) return this.emptyResult();
 
     const inviterName = await this.resolveInviterName(eventId);
     const outcomes: RecipientOutcome[] = [];
@@ -159,6 +169,7 @@ export class NotificationsService {
           status: 'skipped',
           reason: SendFailureReason.INVALID_PHONE,
         });
+        this.warnNotDelivered(eventId, guest, 'skipped', SendFailureReason.INVALID_PHONE);
         continue;
       }
 
@@ -191,6 +202,7 @@ export class NotificationsService {
           reason: firstHardFailure.reason,
           graphCode: firstHardFailure.graphCode,
         });
+        this.warnNotDelivered(eventId, guest, 'failed', firstHardFailure.reason, firstHardFailure.graphCode);
       } else {
         skippedCount += 1;
         outcomes.push({
@@ -200,17 +212,43 @@ export class NotificationsService {
           status: 'skipped',
           reason: SendFailureReason.INVALID_PHONE,
         });
+        this.warnNotDelivered(eventId, guest, 'skipped', SendFailureReason.INVALID_PHONE);
       }
     }
 
+    this.logger.log(
+      `Notified event ${eventId}: ${sentCount} sent, ${failedCount} failed, ` +
+        `${skippedCount} skipped (of ${recipients.length})`,
+    );
+
     return {
       delivery: 'live',
+      allSent: sentCount === recipients.length,
       notifiedCount: recipients.length,
       sentCount,
       failedCount,
       skippedCount,
       recipients: outcomes,
     };
+  }
+
+  /**
+   * Logs one WARN line per recipient the batch could not deliver to, naming
+   * the guest and the Graph reason so an operator can act on it without
+   * re-reading the whole response. The per-number transport error is already
+   * logged by `WhatsappClient`; this is the guest-level, actionable summary.
+   */
+  private warnNotDelivered(
+    eventId: string,
+    guest: GuestWithPhones,
+    status: 'failed' | 'skipped',
+    reason: SendFailureReason,
+    graphCode?: number,
+  ): void {
+    const code = graphCode !== undefined ? ` (graph ${graphCode})` : '';
+    this.logger.warn(
+      `Guest ${guest.id} (${guest.name}) not notified for event ${eventId}: ${status} — ${reason}${code}`,
+    );
   }
 
   /**
@@ -266,26 +304,10 @@ export class NotificationsService {
     return result;
   }
 
-  /** notify-all / notify-pending stay mocked in this slice — no send is attempted. */
-  private dispatchMock(recipients: Guest[]): NotificationResult {
+  private emptyResult(): NotificationResult {
     return {
-      delivery: 'mock',
-      notifiedCount: recipients.length,
-      sentCount: 0,
-      failedCount: 0,
-      skippedCount: 0,
-      recipients: recipients.map((g) => ({
-        id: g.id,
-        name: g.name,
-        phone: g.phone,
-        status: 'skipped',
-      })),
-    };
-  }
-
-  private emptyResult(delivery: 'live' | 'mock'): NotificationResult {
-    return {
-      delivery,
+      delivery: 'live',
+      allSent: true,
       notifiedCount: 0,
       sentCount: 0,
       failedCount: 0,
