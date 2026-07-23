@@ -809,6 +809,18 @@ describe('NotificationsService', () => {
       expect(warned).toContain(SendFailureReason.MARKETING_THROTTLED);
     });
 
+    it('warns for a guest skipped because it has no valid number at all', async () => {
+      const noPhoneGuest = { ...mockGuestA, phone: '' };
+      dbServiceMock.db = buildMockDb([[noPhoneGuest], [], [EVENT_ROW], [USER_ROW]]);
+
+      await service.notifySelected('event-uuid-1', ['guest-uuid-1']);
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const warned = warnSpy.mock.calls[0][0] as string;
+      expect(warned).toContain('guest-uuid-1');
+      expect(warned).toContain('skipped');
+    });
+
     it('does not warn when every recipient was sent', async () => {
       dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
       whatsappClientMock.sendWithResult.mockResolvedValue({ ok: true, messageId: 'wamid.1' });

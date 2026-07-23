@@ -169,6 +169,7 @@ export class NotificationsService {
           status: 'skipped',
           reason: SendFailureReason.INVALID_PHONE,
         });
+        this.warnNotDelivered(eventId, guest, 'skipped', SendFailureReason.INVALID_PHONE);
         continue;
       }
 
