@@ -18,8 +18,7 @@ lerna-debug.log*
 
 # dotenv environment variable files
 .env
-.env.local
-# Tracked, secret-free env config (real secrets live in an untracked .env)
+.env.*
 !.env.example
 
 # Drizzle generated migrations (keep the folder, ignore generated files)
@@ -30,6 +29,3 @@ drizzle/migrations/meta/
 .temp
 .tmp
 .atl
-
-
-.env.local
