@@ -28,6 +28,10 @@ export const secrets = {
 
   DASHBOARD_URL: process.env.DASHBOARD_URL,
   USER_DASHBOARD_URL: process.env.USER_DASHBOARD_URL,
+  // Public base URL of THIS API, used to build links that land back here from
+  // outside the browser session — currently the email-confirmation link.
+  // Optional so existing environments keep booting; falls back to localhost.
+  API_PUBLIC_URL: process.env.API_PUBLIC_URL,
 
   WHATSAPP_API_URL: process.env.WHATSAPP_API_URL!,
   WHATSAPP_API_TOKEN: process.env.WHATSAPP_API_TOKEN!,
@@ -42,4 +46,7 @@ export const secrets = {
   MAIL_PORT: process.env.MAIL_PORT!,
   MAIL_USER: process.env.MAIL_USER!,
   MAIL_PASS: process.env.MAIL_PASS!,
+  // Optional envelope "From". Falls back to MAIL_USER when unset so existing
+  // environments keep working without a new required secret.
+  MAIL_FROM: process.env.MAIL_FROM,
 };
