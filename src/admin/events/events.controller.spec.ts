@@ -70,7 +70,7 @@ describe('EventsController — integration', () => {
         { provide: EventsService, useValue: mockEventsService },
       ],
     })
-      .overrideGuard(AuthGuard('jwt'))
+      .overrideGuard(AuthGuard('jwt-admin'))
       .useClass(MockJwtGuard)
       .compile();
 

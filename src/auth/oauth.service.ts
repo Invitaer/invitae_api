@@ -47,6 +47,11 @@ export class OAuthService {
         email: profile.email,
         name: profile.name,
         password: null,
+        // Google/Facebook already proved the user controls this mailbox, so
+        // there is nothing left for us to confirm. Without this stamp an OAuth
+        // account would be born unconfirmed and could never be fixed: the
+        // confirmation email is only ever sent from the password signup paths.
+        emailVerifiedAt: new Date(),
       })
       .onConflictDoNothing()
       .returning();
@@ -58,6 +63,16 @@ export class OAuthService {
       .from(users)
       .where(eq(users.email, profile.email))
       .then(([u]) => u);
+
+    // The address was already registered with a password and never confirmed.
+    // The provider vouches for it now, so release the account instead of
+    // leaving it locked out of password login forever.
+    if (!userRecord.emailVerifiedAt) {
+      await this.dbService.db
+        .update(users)
+        .set({ emailVerifiedAt: new Date() })
+        .where(eq(users.id, userRecord.id));
+    }
 
     await this.dbService.db.insert(oauthAccounts).values({
       userId: userRecord.id,

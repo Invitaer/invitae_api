@@ -99,7 +99,7 @@ async function buildApp(
       { provide: NotificationsService, useValue: mockNotificationsService },
     ],
   })
-    .overrideGuard(AuthGuard('jwt'))
+    .overrideGuard(AuthGuard('jwt-user'))
     .useClass(jwtGuardClass)
     .overrideGuard(UserEventMemberGuard)
     .useValue(memberGuardValue)

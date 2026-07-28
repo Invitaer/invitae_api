@@ -18,7 +18,7 @@ import { EventOwnerGuard } from '../events/guards/event-owner.guard';
 import { Event } from '../../database/schema';
 
 @Controller('admin/events/:eventId/content')
-@Auth()
+@Auth('admin')
 @UseGuards(EventOwnerGuard)
 export class ContentController {
   constructor(private readonly contentService: ContentService) {}

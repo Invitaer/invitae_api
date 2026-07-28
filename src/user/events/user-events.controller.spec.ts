@@ -74,7 +74,7 @@ describe('UserEventsController — authenticated', () => {
         { provide: GuestEventsService, useValue: mockGuestEvents },
       ],
     })
-      .overrideGuard(AuthGuard('jwt'))
+      .overrideGuard(AuthGuard('jwt-user'))
       .useClass(MockJwtGuard)
       .overrideGuard(UserEventMemberGuard)
       .useValue({ canActivate: () => true })
@@ -167,7 +167,7 @@ describe('UserEventsController — unauthenticated', () => {
         { provide: GuestEventsService, useValue: mockGuestEvents },
       ],
     })
-      .overrideGuard(AuthGuard('jwt'))
+      .overrideGuard(AuthGuard('jwt-user'))
       .useClass(RejectJwtGuard)
       .overrideGuard(UserEventMemberGuard)
       .useValue({ canActivate: () => false })
@@ -220,7 +220,7 @@ describe('UserEventsController — GET :id + GET :id/stats (member)', () => {
         { provide: GuestEventsService, useValue: mockGuestEvents },
       ],
     })
-      .overrideGuard(AuthGuard('jwt'))
+      .overrideGuard(AuthGuard('jwt-user'))
       .useClass(MockJwtGuard)
       .overrideGuard(UserEventMemberGuard)
       .useValue({ canActivate: () => true })
@@ -283,7 +283,7 @@ describe('UserEventsController — GET :id + GET :id/stats (non-member / unauthe
         { provide: GuestEventsService, useValue: mockGuestEvents },
       ],
     })
-      .overrideGuard(AuthGuard('jwt'))
+      .overrideGuard(AuthGuard('jwt-user'))
       .useClass(RejectJwtGuard)
       .overrideGuard(UserEventMemberGuard)
       .useValue({ canActivate: () => false })

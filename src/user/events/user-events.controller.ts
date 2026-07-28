@@ -27,7 +27,7 @@ import { UserEventMemberGuard } from './guards/user-event-member.guard';
 export const SSE_HEARTBEAT_MS = 25_000;
 
 @Controller('user/events')
-@Auth()
+@Auth('user')
 export class UserEventsController {
   constructor(
     private readonly userEventsService: UserEventsService,

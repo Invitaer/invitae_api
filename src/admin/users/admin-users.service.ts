@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ilike, or, sql, eq } from 'drizzle-orm';
+import { EmailVerificationService } from '../../auth/email-verification.service';
 import { CryptoService } from '../../crypto/crypto.service';
 import { DatabaseService } from '../../database/database.service';
 import { UserRole, users } from '../../database/schema';
@@ -32,6 +33,7 @@ export class AdminUsersService {
   constructor(
     private readonly databaseService: DatabaseService,
     private readonly cryptoService: CryptoService,
+    private readonly emailVerificationService: EmailVerificationService,
   ) {}
 
   async findAllPaginated(
@@ -85,6 +87,16 @@ export class AdminUsersService {
           role: dto.role ?? UserRole.USER,
         })
         .returning(SAFE_USER_FIELDS);
+
+      // Mandatory, not a nicety: `AuthService.login` refuses accounts with a
+      // null `emailVerifiedAt`, and an admin-created user has no other way to
+      // clear that flag. Skipping this would hand the admin a password for an
+      // account nobody can ever sign in to.
+      await this.emailVerificationService.sendFor({
+        id: user.id,
+        email: user.email,
+        name: user.name,
+      });
 
       return user;
     } catch (err: any) {

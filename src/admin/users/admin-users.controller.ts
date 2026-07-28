@@ -17,7 +17,7 @@ import { FindUsersQueryDto } from './dto/find-users-query.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 
 @Controller('admin/users')
-@Auth()
+@Auth('admin')
 export class AdminUsersController {
   constructor(private readonly adminUsersService: AdminUsersService) {}
 

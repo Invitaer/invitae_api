@@ -89,7 +89,7 @@ async function buildApp(
       { provide: ContentService, useValue: mockContentService },
     ],
   })
-    .overrideGuard(AuthGuard('jwt'))
+    .overrideGuard(AuthGuard('jwt-admin'))
     .useClass(MockJwtGuard)
     .overrideGuard(EventOwnerGuard)
     .useClass(eventOwnerGuardClass)

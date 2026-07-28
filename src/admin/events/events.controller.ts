@@ -19,7 +19,7 @@ import { EventsService } from './events.service';
 import { EventWithUsers } from './events.types';
 
 @Controller('admin/events')
-@Auth()
+@Auth('admin')
 export class EventsController {
   constructor(private readonly eventsService: EventsService) {}
 

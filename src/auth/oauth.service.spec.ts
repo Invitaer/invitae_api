@@ -78,7 +78,18 @@ describe('OAuthService', () => {
           values: jest.fn().mockResolvedValue(undefined),
         };
       }),
+      update: jest.fn().mockReturnValue({
+        set: jest.fn().mockReturnValue({
+          where: jest.fn().mockResolvedValue(undefined),
+        }),
+      }),
     };
+  }
+
+  /** Grabs the `.values({...})` payload of the Nth `db.insert(...)` call. */
+  function insertedValues(callIndex: number): Record<string, unknown> {
+    const chain = dbServiceMock.db.insert.mock.results[callIndex].value;
+    return chain.values.mock.calls[0][0];
   }
 
   beforeEach(async () => {
@@ -136,6 +147,47 @@ describe('OAuthService', () => {
         role: newUser.role,
       });
       expect(dbServiceMock.db.insert).toHaveBeenCalledTimes(2);
+    });
+
+    it('marks the new account as email-verified — the provider already proved ownership', async () => {
+      const newUser = { ...EXISTING_USER, id: 'new-user-uuid' };
+      dbServiceMock.db = buildMockDb({
+        oauthLookup: [],
+        userLookup: [newUser],
+        insertedUser: [newUser],
+      });
+
+      await service.findOrCreateUser(GOOGLE_PROVIDER, PROVIDER_ID, PROFILE);
+
+      expect(insertedValues(0).emailVerifiedAt).toBeInstanceOf(Date);
+    });
+
+    it('confirms a pre-existing local account that signs in with the same address', async () => {
+      // Registered with a password, never clicked the link, now uses Google.
+      // Google vouches for the mailbox, so the account must stop being stuck.
+      const unverified = { ...EXISTING_USER, emailVerifiedAt: null };
+      dbServiceMock.db = buildMockDb({
+        oauthLookup: [],
+        userLookup: [unverified],
+        insertedUser: [], // onConflictDoNothing — the email is taken
+      });
+
+      await service.findOrCreateUser(GOOGLE_PROVIDER, PROVIDER_ID, PROFILE);
+
+      expect(dbServiceMock.db.update).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not re-stamp an account that was already verified', async () => {
+      const verified = { ...EXISTING_USER, emailVerifiedAt: new Date() };
+      dbServiceMock.db = buildMockDb({
+        oauthLookup: [],
+        userLookup: [verified],
+        insertedUser: [],
+      });
+
+      await service.findOrCreateUser(GOOGLE_PROVIDER, PROVIDER_ID, PROFILE);
+
+      expect(dbServiceMock.db.update).not.toHaveBeenCalled();
     });
 
     it('is idempotent — same provider+providerId always returns the same user without duplicate inserts', async () => {
@@ -213,6 +265,13 @@ describe('OAuthService', () => {
           return {
             values: jest.fn().mockResolvedValue(undefined),
           };
+        }),
+        // The collision target may be an unconfirmed local account, which the
+        // service releases by stamping emailVerifiedAt.
+        update: jest.fn().mockReturnValue({
+          set: jest.fn().mockReturnValue({
+            where: jest.fn().mockResolvedValue(undefined),
+          }),
         }),
       } as unknown as typeof dbServiceMock.db;
 

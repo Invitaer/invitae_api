@@ -21,3 +21,8 @@ export class RegisterDto {
   @MinLength(1)
   name: string;
 }
+
+export class ResendVerificationDto {
+  @IsEmail()
+  email: string;
+}
