@@ -1,8 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { and, eq } from 'drizzle-orm';
 import { DatabaseService } from '../database/database.service';
 import { Event, events, Guest, guests } from '../database/schema';
 import { RedisService } from '../redis/redis.service';
+import { GuestEventsService } from '../realtime/guest-events.service';
 import { InvitationDto } from '../admin/content/dto/invitation.dto';
 import { ConfirmAttendanceDto } from './dto/confirm-attendance.dto';
 import { projectInvitation } from './invitation.projection';
@@ -24,9 +25,12 @@ export interface GuestInvitationResponse extends InvitationDto {
 
 @Injectable()
 export class InvitaeService {
+  private readonly logger = new Logger(InvitaeService.name);
+
   constructor(
     private readonly databaseService: DatabaseService,
     private readonly redisService: RedisService,
+    private readonly guestEvents: GuestEventsService,
   ) {}
 
   async confirmAttendance(dto: ConfirmAttendanceDto): Promise<PublicGuest> {
@@ -58,6 +62,25 @@ export class InvitaeService {
         `Guest ${dto.guestId} not found for this invitation`,
       );
     }
+
+    // Broadcast AFTER the write is committed, and never let it fail the RSVP:
+    // the guest's confirmation already succeeded, so a Redis outage must not
+    // surface as an error that invites them to retry something that worked.
+    try {
+      await this.guestEvents.publish({
+        eventId,
+        guestId: guest.id,
+        rsvpStatus: guest.rsvpStatus,
+        at: new Date().toISOString(),
+      });
+    } catch (error) {
+      this.logger.error(
+        `RSVP saved but broadcast failed for guest ${guest.id}: ${
+          (error as Error).message
+        }`,
+      );
+    }
+
     return this.toPublicGuest(guest);
   }
 

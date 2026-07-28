@@ -12,9 +12,11 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import * as request from 'supertest';
+import { Subject } from 'rxjs';
 import { UserEventsController } from './user-events.controller';
 import { UserEventsService } from './user-events.service';
 import { UserEventMemberGuard } from './guards/user-event-member.guard';
+import { GuestEventsService } from '../../realtime/guest-events.service';
 import { AuthUser } from '../../auth/interfaces/auth-user.interface';
 import { UserRole } from '../../database/schema';
 
@@ -50,6 +52,8 @@ class RejectJwtGuard {
   }
 }
 
+const mockGuestEvents = { streamFor: jest.fn(() => new Subject().asObservable()) };
+
 const mockUserEventsService = {
   findByUser: jest.fn(),
   update: jest.fn(),
@@ -67,6 +71,7 @@ describe('UserEventsController — authenticated', () => {
       controllers: [UserEventsController],
       providers: [
         { provide: UserEventsService, useValue: mockUserEventsService },
+        { provide: GuestEventsService, useValue: mockGuestEvents },
       ],
     })
       .overrideGuard(AuthGuard('jwt'))
@@ -159,6 +164,7 @@ describe('UserEventsController — unauthenticated', () => {
       controllers: [UserEventsController],
       providers: [
         { provide: UserEventsService, useValue: mockUserEventsService },
+        { provide: GuestEventsService, useValue: mockGuestEvents },
       ],
     })
       .overrideGuard(AuthGuard('jwt'))
@@ -211,6 +217,7 @@ describe('UserEventsController — GET :id + GET :id/stats (member)', () => {
       controllers: [UserEventsController],
       providers: [
         { provide: UserEventsService, useValue: mockUserEventsService },
+        { provide: GuestEventsService, useValue: mockGuestEvents },
       ],
     })
       .overrideGuard(AuthGuard('jwt'))
@@ -273,6 +280,7 @@ describe('UserEventsController — GET :id + GET :id/stats (non-member / unauthe
       controllers: [UserEventsController],
       providers: [
         { provide: UserEventsService, useValue: mockUserEventsService },
+        { provide: GuestEventsService, useValue: mockGuestEvents },
       ],
     })
       .overrideGuard(AuthGuard('jwt'))

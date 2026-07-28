@@ -841,4 +841,66 @@ describe('NotificationsService', () => {
       expect(summary).toMatch(/1 sent/);
     });
   });
+
+  describe('request logging — proves the real dispatch started, even when nobody matches', () => {
+    let logSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      logSpy = jest.spyOn(Logger.prototype, 'log').mockImplementation();
+      jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    const logsFor = () => logSpy.mock.calls.map((c) => String(c[0]));
+
+    it('logs that a PENDING notify was requested, naming the event, BEFORE any send', async () => {
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
+      whatsappClientMock.sendWithResult.mockResolvedValue({ ok: true });
+
+      await service.notifyPending('event-uuid-1');
+
+      expect(
+        logsFor().some((l) => l.includes('event-uuid-1') && /pending/i.test(l) && /request/i.test(l)),
+      ).toBe(true);
+    });
+
+    it('logs a dispatch line even when ZERO pending guests match, so an empty set is NOT silent', async () => {
+      dbServiceMock.db = buildMockDb([[]]);
+
+      await service.notifyPending('event-uuid-1');
+
+      expect(
+        logsFor().some((l) => l.includes('event-uuid-1') && /0 recipient/i.test(l)),
+      ).toBe(true);
+    });
+
+    it('records the search term when a filtered PENDING notify is requested', async () => {
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
+      whatsappClientMock.sendWithResult.mockResolvedValue({ ok: true });
+
+      await service.notifyPending('event-uuid-1', 'alice');
+
+      expect(logsFor().some((l) => /request/i.test(l) && l.includes('alice'))).toBe(true);
+    });
+
+    it('logs an ALL notify request naming the mode', async () => {
+      dbServiceMock.db = buildMockDb([[mockGuestA], [], [EVENT_ROW], [USER_ROW]]);
+      whatsappClientMock.sendWithResult.mockResolvedValue({ ok: true });
+
+      await service.notifyAll('event-uuid-1');
+
+      expect(logsFor().some((l) => l.includes('event-uuid-1') && /all/i.test(l) && /request/i.test(l))).toBe(true);
+    });
+
+    it('logs a SELECTED notify request even for an empty selection (short-circuit path)', async () => {
+      await service.notifySelected('event-uuid-1', []);
+
+      expect(
+        logsFor().some((l) => l.includes('event-uuid-1') && /selected/i.test(l) && /request/i.test(l)),
+      ).toBe(true);
+    });
+  });
 });
