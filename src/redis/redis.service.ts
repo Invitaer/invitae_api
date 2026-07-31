@@ -27,7 +27,10 @@ export class RedisService implements OnModuleDestroy {
     });
 
     RedisService.instance.on("error", (err: Error) => {
-      this.logger.error(`Redis connection HERE error: ${err.message}`, err.stack);
+      this.logger.error(
+        `Redis connection HERE error: ${err.message}`,
+        err.stack,
+      );
     });
   }
 
@@ -50,7 +53,11 @@ export class RedisService implements OnModuleDestroy {
     await this.client.del(key);
   }
 
-  async setNX(key: string, value: string, ttlSeconds: number): Promise<boolean> {
+  async setNX(
+    key: string,
+    value: string,
+    ttlSeconds: number,
+  ): Promise<boolean> {
     const result = await this.client.set(key, value, "EX", ttlSeconds, "NX");
     return result === "OK";
   }

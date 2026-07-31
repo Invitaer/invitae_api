@@ -60,6 +60,9 @@ export class NotificationsService {
    * WhatsApp interactive-button message per recipient (`delivery: 'live'`).
    */
   async notifySelected(eventId: string, guestIds: string[]): Promise<NotificationResult> {
+    this.logger.log(
+      `Notify requested — event ${eventId}, mode=SELECTED, ${guestIds.length} id(s)`,
+    );
     if (guestIds.length === 0) return this.emptyResult();
 
     const recipients = await this.databaseService.db
@@ -78,6 +81,7 @@ export class NotificationsService {
    * Sends for real, exactly like `notifySelected` (`delivery: 'live'`).
    */
   async notifyAll(eventId: string, search?: string): Promise<NotificationResult> {
+    this.logger.log(`Notify requested — event ${eventId}, mode=ALL${this.searchSuffix(search)}`);
     const recipients = await this.databaseService.db
       .select()
       .from(guests)
@@ -92,7 +96,11 @@ export class NotificationsService {
    * additionally narrows the recipients. Sends for real, exactly like
    * `notifySelected` (`delivery: 'live'`).
    */
+  // The PENDING restriction is applied via `eq(guests.rsvpStatus, PENDING)`
+  // ANDed with the shared filter, so ONLY guests still awaiting a reply are
+  // ever notified — an ACCEPTED/DECLINED guest can never receive this batch.
   async notifyPending(eventId: string, search?: string): Promise<NotificationResult> {
+    this.logger.log(`Notify requested — event ${eventId}, mode=PENDING${this.searchSuffix(search)}`);
     const recipients = await this.databaseService.db
       .select()
       .from(guests)
@@ -141,6 +149,9 @@ export class NotificationsService {
     eventId: string,
     recipients: GuestWithPhones[],
   ): Promise<NotificationResult> {
+    this.logger.log(
+      `Notify dispatch — event ${eventId}: ${recipients.length} recipient(s) resolved`,
+    );
     if (recipients.length === 0) return this.emptyResult();
 
     const inviterName = await this.resolveInviterName(eventId);
@@ -302,6 +313,12 @@ export class NotificationsService {
     }
 
     return result;
+  }
+
+  /** ` search="<term>"` when a non-blank search is present, else empty. */
+  private searchSuffix(search?: string): string {
+    const trimmed = search?.trim();
+    return trimmed ? ` search="${trimmed}"` : '';
   }
 
   private emptyResult(): NotificationResult {

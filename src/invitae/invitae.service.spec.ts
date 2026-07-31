@@ -14,6 +14,7 @@ import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { InvitaeService } from './invitae.service';
 import { RedisService } from '../redis/redis.service';
+import { GuestEventsService } from '../realtime/guest-events.service';
 import { DatabaseService } from '../database/database.service';
 import { Event } from '../database/schema';
 import { InvitationDto } from '../admin/content/dto/invitation.dto';
@@ -24,6 +25,10 @@ const mockRedisService = {
   get: jest.fn(),
   set: jest.fn(),
   del: jest.fn(),
+};
+
+const mockGuestEvents = {
+  publish: jest.fn().mockResolvedValue(undefined),
 };
 
 // --- Fixtures ---
@@ -107,6 +112,7 @@ describe('InvitaeService — slug → event resolution (Postgres-backed)', () =>
       providers: [
         InvitaeService,
         { provide: RedisService, useValue: mockRedisService },
+        { provide: GuestEventsService, useValue: mockGuestEvents },
         { provide: DatabaseService, useValue: { db: { ...buildMockDb(), ...dbOverride } } },
       ],
     }).compile();
@@ -193,6 +199,7 @@ describe('InvitaeService — confirmAttendance (event-scoped, no PII)', () => {
       providers: [
         InvitaeService,
         { provide: RedisService, useValue: mockRedisService },
+        { provide: GuestEventsService, useValue: mockGuestEvents },
         { provide: DatabaseService, useValue: { db: dbMock } },
       ],
     }).compile();
@@ -216,6 +223,72 @@ describe('InvitaeService — confirmAttendance (event-scoped, no PII)', () => {
   function mockPublishedInvitation() {
     mockRedisService.get.mockResolvedValueOnce(JSON.stringify(MOCK_INVITATION));
   }
+
+  it('broadcasts the change so an organizer watching the dashboard sees it immediately', async () => {
+    await build([MOCK_EVENT]);
+    mockPublishedInvitation();
+    mockUpdateReturning([{ ...MOCK_GUEST_BASE, rsvpStatus: 'ACCEPTED' }]);
+
+    await service.confirmAttendance({
+      slug: SLUG,
+      guestId: GUEST_ID,
+      attending: true,
+    });
+
+    expect(mockGuestEvents.publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventId: EVENT_ID,
+        guestId: GUEST_ID,
+        rsvpStatus: 'ACCEPTED',
+      }),
+    );
+  });
+
+  it('broadcasts a decline too — "No asistirá" is just as much a status change', async () => {
+    await build([MOCK_EVENT]);
+    mockPublishedInvitation();
+    mockUpdateReturning([{ ...MOCK_GUEST_BASE, rsvpStatus: 'DECLINED' }]);
+
+    await service.confirmAttendance({
+      slug: SLUG,
+      guestId: GUEST_ID,
+      attending: false,
+    });
+
+    expect(mockGuestEvents.publish).toHaveBeenCalledWith(
+      expect.objectContaining({ rsvpStatus: 'DECLINED' }),
+    );
+  });
+
+  it('does not broadcast when the guest does not belong to the event', async () => {
+    await build([MOCK_EVENT]);
+    mockPublishedInvitation();
+    mockUpdateReturning([]); // scoped update matched nothing
+
+    await expect(
+      service.confirmAttendance({ slug: SLUG, guestId: GUEST_ID, attending: true }),
+    ).rejects.toThrow(NotFoundException);
+
+    expect(mockGuestEvents.publish).not.toHaveBeenCalled();
+  });
+
+  it('still confirms the guest when the broadcast fails', async () => {
+    // The write is committed by this point. Redis being down must not turn a
+    // successful RSVP into an error for the guest — they would retry and see a
+    // failure for something that actually worked.
+    await build([MOCK_EVENT]);
+    mockPublishedInvitation();
+    mockUpdateReturning([{ ...MOCK_GUEST_BASE, rsvpStatus: 'ACCEPTED' }]);
+    mockGuestEvents.publish.mockRejectedValueOnce(new Error('redis down'));
+
+    const result = await service.confirmAttendance({
+      slug: SLUG,
+      guestId: GUEST_ID,
+      attending: true,
+    });
+
+    expect(result.rsvpStatus).toBe('ACCEPTED');
+  });
 
   it('attending: true → sets rsvpStatus = ACCEPTED, scoped by slug', async () => {
     await build([MOCK_EVENT]);
@@ -365,6 +438,7 @@ describe('InvitaeService — getGuestInvitation', () => {
       providers: [
         InvitaeService,
         { provide: RedisService, useValue: mockRedisService },
+        { provide: GuestEventsService, useValue: mockGuestEvents },
         { provide: DatabaseService, useValue: { db: dbMock } },
       ],
     }).compile();
@@ -527,6 +601,7 @@ describe('InvitaeService — stale stored content is overridden by the event row
       providers: [
         InvitaeService,
         { provide: RedisService, useValue: mockRedisService },
+        { provide: GuestEventsService, useValue: mockGuestEvents },
         {
           provide: DatabaseService,
           useValue: {
