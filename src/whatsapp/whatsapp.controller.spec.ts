@@ -60,8 +60,8 @@ describe('WhatsappController', () => {
   });
 
   describe('startLink (POST link/start)', () => {
-    it('delegates to WhatsappLinkService.startLink using the authenticated user id', async () => {
-      whatsappLinkServiceMock.startLink.mockResolvedValue({ code: '123456' });
+    it('delegates to WhatsappLinkService.startLink with the authenticated user id and email', async () => {
+      whatsappLinkServiceMock.startLink.mockResolvedValue({ delivered: true, email: 'a@b.com' });
       const user: AuthUser = {
         id: 'user-uuid-1',
         email: 'a@b.com',
@@ -71,8 +71,8 @@ describe('WhatsappController', () => {
 
       const result = await controller.startLink(user);
 
-      expect(whatsappLinkServiceMock.startLink).toHaveBeenCalledWith('user-uuid-1');
-      expect(result).toEqual({ code: '123456' });
+      expect(whatsappLinkServiceMock.startLink).toHaveBeenCalledWith('user-uuid-1', 'a@b.com');
+      expect(result).toEqual({ delivered: true, email: 'a@b.com' });
     });
   });
 });

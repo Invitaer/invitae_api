@@ -10,9 +10,11 @@ jest.mock('../config/secrets', () => ({
 jest.mock('../database/database.service');
 jest.mock('../redis/redis.service');
 
+import { ServiceUnavailableException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { WhatsappLinkService } from './whatsapp-link.service';
 import { DatabaseService } from '../database/database.service';
+import { MailService } from '../mail/mail.service';
 import { RedisService } from '../redis/redis.service';
 import { whatsappLinks } from '../database/schema';
 
@@ -37,16 +39,19 @@ describe('WhatsappLinkService', () => {
   let service: WhatsappLinkService;
   let dbServiceMock: { db: ReturnType<typeof buildMockDb> };
   let redisServiceMock: { set: jest.Mock; get: jest.Mock; del: jest.Mock };
+  let mailServiceMock: { sendWhatsappOtp: jest.Mock };
 
   beforeEach(async () => {
     dbServiceMock = { db: buildMockDb() };
     redisServiceMock = { set: jest.fn(), get: jest.fn(), del: jest.fn() };
+    mailServiceMock = { sendWhatsappOtp: jest.fn().mockResolvedValue({ ok: true, messageId: 'm-1' }) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         WhatsappLinkService,
         { provide: DatabaseService, useValue: dbServiceMock },
         { provide: RedisService, useValue: redisServiceMock },
+        { provide: MailService, useValue: mailServiceMock },
       ],
     }).compile();
 
@@ -54,15 +59,45 @@ describe('WhatsappLinkService', () => {
   });
 
   describe('startLink', () => {
-    it('generates a 6-digit OTP and stores wa:otp:{code}=userId with a 300s TTL', async () => {
-      const { code } = await service.startLink('user-uuid-1');
+    /** Recovers the generated code from the `wa:otp:<code>` Redis key. */
+    const capturedCode = () => {
+      const key = redisServiceMock.set.mock.calls[0][0] as string;
+      return key.replace('wa:otp:', '');
+    };
 
+    it('generates a 6-digit OTP and stores wa:otp:{code}=userId with a 300s TTL', async () => {
+      await service.startLink('user-uuid-1', 'me@example.com');
+
+      const code = capturedCode();
       expect(code).toMatch(/^\d{6}$/);
       expect(redisServiceMock.set).toHaveBeenCalledWith(
         `wa:otp:${code}`,
         'user-uuid-1',
         300,
       );
+    });
+
+    it('emails the SAME code to the user with the 5-minute TTL, and does NOT return the code', async () => {
+      const result = await service.startLink('user-uuid-1', 'me@example.com');
+
+      const code = capturedCode();
+      expect(mailServiceMock.sendWhatsappOtp).toHaveBeenCalledWith('me@example.com', {
+        code,
+        ttlMinutes: 5,
+      });
+      expect(result).toEqual({ delivered: true, email: 'me@example.com' });
+      expect(result).not.toHaveProperty('code');
+    });
+
+    it('deletes the OTP key and throws when the email fails to send (code never left dangling)', async () => {
+      mailServiceMock.sendWhatsappOtp.mockResolvedValue({ ok: false, error: 'smtp down' });
+
+      await expect(service.startLink('user-uuid-1', 'me@example.com')).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+
+      const code = capturedCode();
+      expect(redisServiceMock.del).toHaveBeenCalledWith(`wa:otp:${code}`);
     });
   });
 
