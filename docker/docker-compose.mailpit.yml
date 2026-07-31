@@ -1,0 +1,22 @@
+version: '3.9'
+
+networks:
+  invitae_net:
+    external: true
+
+# Local SMTP sink for development. Captures every outbound email (it never
+# delivers to real inboxes) and exposes them in a web UI at http://localhost:8025.
+# SMTP listens on 1025 — point MAIL_HOST/MAIL_PORT at it in .env.local.
+services:
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: invitae_mailpit
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    networks:
+      - invitae_net
