@@ -11,6 +11,7 @@ import { InvitaeModule } from './invitae/invitae.module';
 import { AuthModule } from './auth/auth.module';
 import { CryptoModule } from './crypto/crypto.module';
 import { WhatsappModule } from './whatsapp/whatsapp.module';
+import { MailModule } from './mail/mail.module';
 
 @Module({
   imports: [
@@ -27,6 +28,7 @@ import { WhatsappModule } from './whatsapp/whatsapp.module';
     UserEventsModule,
     InvitaeModule,
     WhatsappModule,
+    MailModule,
   ],
   controllers: [AppController],
   providers: [AppService],

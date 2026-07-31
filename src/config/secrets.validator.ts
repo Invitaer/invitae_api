@@ -24,6 +24,7 @@ const SECRETS: SecretConfig[] = [
   { name: 'MAIL_PORT', required: true },
   { name: 'MAIL_USER', required: true },
   { name: 'MAIL_PASS', required: true },
+  { name: 'MAIL_FROM', required: false },
   { name: 'GOOGLE_CLIENT_ID', required: false },
   { name: 'GOOGLE_CLIENT_SECRET', required: false },
   { name: 'GOOGLE_CALLBACK_URL', required: false },
