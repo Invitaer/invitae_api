@@ -77,7 +77,7 @@ async function buildApp(guardClass: new () => object): Promise<INestApplication>
       { provide: AdminUsersService, useValue: mockAdminUsersService },
     ],
   })
-    .overrideGuard(AuthGuard('jwt'))
+    .overrideGuard(AuthGuard('jwt-admin'))
     .useClass(guardClass)
     .compile();
 

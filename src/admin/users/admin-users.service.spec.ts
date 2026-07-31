@@ -12,6 +12,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { AdminUsersService } from './admin-users.service';
 import { DatabaseService } from '../../database/database.service';
 import { CryptoService } from '../../crypto/crypto.service';
+import { EmailVerificationService } from '../../auth/email-verification.service';
 import { UserRole } from '../../database/schema';
 
 // --- Fixtures ---
@@ -85,6 +86,10 @@ const mockCryptoService = {
   hash: jest.fn().mockResolvedValue('hashed-password'),
 };
 
+const mockEmailVerification = {
+  sendFor: jest.fn().mockResolvedValue({ ok: true }),
+};
+
 describe('AdminUsersService', () => {
   let service: AdminUsersService;
   let dbServiceMock: { db: ReturnType<typeof buildMockDb> };
@@ -98,6 +103,7 @@ describe('AdminUsersService', () => {
         AdminUsersService,
         { provide: DatabaseService, useValue: dbServiceMock },
         { provide: CryptoService, useValue: mockCryptoService },
+        { provide: EmailVerificationService, useValue: mockEmailVerification },
       ],
     }).compile();
 
@@ -220,6 +226,35 @@ describe('AdminUsersService', () => {
       await expect(
         service.create({ name: 'Alice', email: 'dup@test.com', password: 'secret', role: UserRole.USER }),
       ).rejects.toThrow(ConflictException);
+    });
+
+    it('sends a confirmation email — an admin-created account cannot log in without it', async () => {
+      dbServiceMock.db = buildMockDb([MOCK_USER], 0);
+
+      await service.create({
+        name: 'Alice',
+        email: 'alice@test.com',
+        password: 'plain-secret',
+        role: UserRole.USER,
+      });
+
+      expect(mockEmailVerification.sendFor).toHaveBeenCalledWith(
+        expect.objectContaining({ id: MOCK_USER.id, email: MOCK_USER.email }),
+      );
+    });
+
+    it('does not send anything when the insert failed', async () => {
+      const returning = jest.fn().mockRejectedValue({ code: '23505' });
+      dbServiceMock.db = {
+        ...dbServiceMock.db,
+        insert: jest.fn().mockReturnValue({ values: jest.fn().mockReturnValue({ returning }) }),
+      } as any;
+
+      await expect(
+        service.create({ name: 'Alice', email: 'dup@test.com', password: 'secret', role: UserRole.USER }),
+      ).rejects.toThrow(ConflictException);
+
+      expect(mockEmailVerification.sendFor).not.toHaveBeenCalled();
     });
   });
 

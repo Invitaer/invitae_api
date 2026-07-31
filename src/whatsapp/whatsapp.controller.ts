@@ -47,7 +47,7 @@ export class WhatsappController {
   }
 
   @Post('link/start')
-  @Auth()
+  @Auth('user')
   startLink(@CurrentUser() user: AuthUser): Promise<{ delivered: true; email: string }> {
     return this.whatsappLinkService.startLink(user.id, user.email);
   }

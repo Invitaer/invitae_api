@@ -20,7 +20,7 @@ import { GuestsService } from './guests.service';
 
 @Controller('admin/events/:eventId/guests')
 @UseGuards(EventOwnerGuard)
-@Auth()
+@Auth('admin')
 export class GuestsController {
   constructor(private readonly guestsService: GuestsService) {}
 

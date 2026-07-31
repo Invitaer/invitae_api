@@ -18,6 +18,14 @@ export const users = pgTable('users', {
   password: varchar('password', { length: 255 }),
   name: varchar('name', { length: 255 }).notNull(),
   role: userRoleEnum('role').notNull().default(UserRole.USER),
+  /**
+   * When the user proved they own this address. NULL means unconfirmed, and
+   * `AuthService.login` refuses those accounts — so this column is a login
+   * gate, not just an audit field. Deliberately has no default: every new row
+   * starts unconfirmed and is cleared only by `EmailVerificationService`.
+   * OAuth sign-ups are stamped at creation (the provider already verified it).
+   */
+  emailVerifiedAt: timestamp('email_verified_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 

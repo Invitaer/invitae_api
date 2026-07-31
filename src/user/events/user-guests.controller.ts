@@ -26,7 +26,7 @@ import { NotifyGuestsDto } from './dto/notify-guests.dto';
 import { UserEventMemberGuard } from './guards/user-event-member.guard';
 
 @Controller('user/events/:id/guests')
-@Auth()
+@Auth('user')
 export class UserGuestsController {
   constructor(
     private readonly guestsService: GuestsService,

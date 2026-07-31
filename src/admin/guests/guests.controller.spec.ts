@@ -97,7 +97,7 @@ async function buildApp(
       { provide: GuestsService, useValue: mockGuestsService },
     ],
   })
-    .overrideGuard(AuthGuard('jwt'))
+    .overrideGuard(AuthGuard('jwt-admin'))
     .useClass(MockJwtGuard)
     .overrideGuard(EventOwnerGuard)
     .useClass(eventOwnerGuardClass)
