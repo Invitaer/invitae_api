@@ -7,9 +7,10 @@ import { WhatsappSenderModule } from './whatsapp-sender.module';
 import { WhatsappSignatureGuard } from './guards/whatsapp-signature.guard';
 import { UserEventsModule } from '../user/events/user-events.module';
 import { GuestsModule } from '../admin/guests/guests.module';
+import { MailModule } from '../mail/mail.module';
 
 @Module({
-  imports: [UserEventsModule, GuestsModule, WhatsappSenderModule],
+  imports: [UserEventsModule, GuestsModule, WhatsappSenderModule, MailModule],
   controllers: [WhatsappController],
   providers: [
     WhatsappService,
