@@ -11,6 +11,8 @@ import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { GuestsService } from './guests.service';
 import { DatabaseService } from '../../database/database.service';
+import { GuestEventsService } from '../../realtime/guest-events.service';
+import { RsvpStatus } from '../../database/schema/guests.schema';
 
 const MOCK_GUEST_E1 = {
   id: 'guest-uuid-1',
@@ -99,14 +101,17 @@ function buildMockDb(guestRows: unknown[] = [], phoneRows: unknown[] = []) {
 describe('GuestsService (eventId scoping)', () => {
   let service: GuestsService;
   let dbServiceMock: { db: ReturnType<typeof buildMockDb> };
+  let guestEventsMock: { publish: jest.Mock };
 
   beforeEach(async () => {
     dbServiceMock = { db: buildMockDb() };
+    guestEventsMock = { publish: jest.fn().mockResolvedValue(undefined) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         GuestsService,
         { provide: DatabaseService, useValue: dbServiceMock },
+        { provide: GuestEventsService, useValue: guestEventsMock },
       ],
     }).compile();
 
@@ -265,6 +270,124 @@ describe('GuestsService (eventId scoping)', () => {
       });
 
       expect(result.additionalPhones).toEqual(['888']);
+    });
+  });
+
+  /**
+   * The live guest list is fed by `GuestEventsService`. Until now only the
+   * PUBLIC rsvp path (`InvitaeService.confirm`) broadcast, so an RSVP edited
+   * from a dashboard reached nobody else watching the same event.
+   */
+  describe('RSVP broadcast on update', () => {
+    it('publishes a guest-rsvp change when the update sets rsvpStatus', async () => {
+      const guestRow = { ...MOCK_GUEST_E1, rsvpStatus: 'ACCEPTED' };
+      dbServiceMock.db = buildMockDb([guestRow], []);
+
+      await service.update('event-uuid-1', 'guest-uuid-1', {
+        rsvpStatus: RsvpStatus.ACCEPTED,
+      });
+
+      expect(guestEventsMock.publish).toHaveBeenCalledTimes(1);
+      expect(guestEventsMock.publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventId: 'event-uuid-1',
+          guestId: 'guest-uuid-1',
+          rsvpStatus: 'ACCEPTED',
+        }),
+      );
+    });
+
+    it('carries the status from the PERSISTED row, not from the incoming dto', async () => {
+      // The row is the only source of truth about what was actually stored.
+      const guestRow = { ...MOCK_GUEST_E1, rsvpStatus: 'DECLINED' };
+      dbServiceMock.db = buildMockDb([guestRow], []);
+
+      await service.update('event-uuid-1', 'guest-uuid-1', {
+        rsvpStatus: RsvpStatus.DECLINED,
+      });
+
+      expect(guestEventsMock.publish).toHaveBeenCalledWith(
+        expect.objectContaining({ rsvpStatus: 'DECLINED' }),
+      );
+    });
+
+    it('stamps the change with an ISO timestamp so clients can order frames', async () => {
+      const guestRow = { ...MOCK_GUEST_E1, rsvpStatus: 'ACCEPTED' };
+      dbServiceMock.db = buildMockDb([guestRow], []);
+
+      await service.update('event-uuid-1', 'guest-uuid-1', {
+        rsvpStatus: RsvpStatus.ACCEPTED,
+      });
+
+      const [change] = guestEventsMock.publish.mock.calls[0] as [
+        { at: string },
+      ];
+      expect(new Date(change.at).toISOString()).toBe(change.at);
+    });
+
+    it('stays silent when the update does not touch rsvpStatus', async () => {
+      // Renaming a guest is not an RSVP change; a frame here would be noise
+      // on every organizer's stream.
+      const guestRow = { ...MOCK_GUEST_E1, name: 'Alice Updated' };
+      dbServiceMock.db = buildMockDb([guestRow], []);
+
+      await service.update('event-uuid-1', 'guest-uuid-1', {
+        name: 'Alice Updated',
+      });
+
+      expect(guestEventsMock.publish).not.toHaveBeenCalled();
+    });
+
+    it('broadcasts only AFTER the transaction commits', async () => {
+      // Publishing inside the transaction would announce a change that a
+      // later rollback silently undoes.
+      const guestRow = { ...MOCK_GUEST_E1, rsvpStatus: 'ACCEPTED' };
+      dbServiceMock.db = buildMockDb([guestRow], []);
+
+      const order: string[] = [];
+      const realTransaction = dbServiceMock.db.transaction;
+      dbServiceMock.db.transaction = jest.fn(
+        async (cb: (tx: unknown) => unknown) => {
+          const result = await realTransaction(cb);
+          order.push('commit');
+          return result;
+        },
+      ) as unknown as jest.Mock;
+      guestEventsMock.publish.mockImplementation(async () => {
+        order.push('publish');
+      });
+
+      await service.update('event-uuid-1', 'guest-uuid-1', {
+        rsvpStatus: RsvpStatus.ACCEPTED,
+      });
+
+      expect(order).toEqual(['commit', 'publish']);
+    });
+
+    it('never fails the update when the broadcast throws', async () => {
+      // The write already committed. Surfacing a Redis outage as a 500 would
+      // invite the organizer to retry something that actually worked.
+      const guestRow = { ...MOCK_GUEST_E1, rsvpStatus: 'ACCEPTED' };
+      dbServiceMock.db = buildMockDb([guestRow], []);
+      guestEventsMock.publish.mockRejectedValue(new Error('redis is down'));
+
+      const result = await service.update('event-uuid-1', 'guest-uuid-1', {
+        rsvpStatus: RsvpStatus.ACCEPTED,
+      });
+
+      expect(result).toEqual(expect.objectContaining({ id: 'guest-uuid-1' }));
+    });
+
+    it('does not broadcast when the guest does not exist in that event', async () => {
+      dbServiceMock.db = buildMockDb([], []);
+
+      await expect(
+        service.update('event-uuid-1', 'missing-guest', {
+          rsvpStatus: RsvpStatus.ACCEPTED,
+        }),
+      ).rejects.toThrow(NotFoundException);
+
+      expect(guestEventsMock.publish).not.toHaveBeenCalled();
     });
   });
 

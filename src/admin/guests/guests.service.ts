@@ -1,7 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { DatabaseService } from '../../database/database.service';
 import { guests, Guest, NewGuest, guestPhones } from '../../database/schema';
+import { GuestEventsService } from '../../realtime/guest-events.service';
 import { CreateGuestDto } from './dto/create-guest.dto';
 import { FindGuestsQueryDto } from './dto/find-guests-query.dto';
 import { UpdateGuestDto } from './dto/update-guest.dto';
@@ -11,7 +12,12 @@ export type GuestWithPhones = Guest & { additionalPhones: string[] };
 
 @Injectable()
 export class GuestsService {
-  constructor(private readonly databaseService: DatabaseService) {}
+  private readonly logger = new Logger(GuestsService.name);
+
+  constructor(
+    private readonly databaseService: DatabaseService,
+    private readonly guestEvents: GuestEventsService,
+  ) {}
 
   async findAll(eventId: string): Promise<GuestWithPhones[]> {
     const guestList = await this.databaseService.db
@@ -179,7 +185,7 @@ export class GuestsService {
   ): Promise<GuestWithPhones> {
     const { additionalPhones, ...guestData } = dto;
 
-    return this.databaseService.db.transaction(async (tx) => {
+    const updated = await this.databaseService.db.transaction(async (tx) => {
       const [guest] = await tx
         .update(guests)
         .set({ ...guestData, updatedAt: new Date() })
@@ -215,6 +221,49 @@ export class GuestsService {
         additionalPhones: existingPhoneRows.map((p) => p.phone),
       };
     });
+
+    // Only an RSVP change belongs on the stream: this same method also renames
+    // guests and edits tickets, and a frame for those would be noise on every
+    // connected organizer.
+    if (dto.rsvpStatus !== undefined) {
+      await this.broadcastRsvp(eventId, updated);
+    }
+
+    return updated;
+  }
+
+  /**
+   * Announces an RSVP change made from a dashboard.
+   *
+   * Until this existed, `InvitaeService.confirm` — the PUBLIC rsvp link — was
+   * the only publisher, so an organizer editing an RSVP left every other
+   * organizer watching the same event with a stale list until they reloaded.
+   *
+   * Called only AFTER the transaction commits: broadcasting from inside it
+   * would announce a change that a rollback then silently undoes.
+   */
+  private async broadcastRsvp(
+    eventId: string,
+    guest: GuestWithPhones,
+  ): Promise<void> {
+    try {
+      await this.guestEvents.publish({
+        eventId,
+        guestId: guest.id,
+        // The persisted row, never the dto — it is the only proof of what
+        // actually landed in the database.
+        rsvpStatus: guest.rsvpStatus,
+        at: new Date().toISOString(),
+      });
+    } catch (error) {
+      // The write already committed. Surfacing a Redis outage as a failed
+      // update would invite a retry of something that actually worked.
+      this.logger.error(
+        `Guest ${guest.id} updated but RSVP broadcast failed: ${
+          (error as Error).message
+        }`,
+      );
+    }
   }
 
   async remove(eventId: string, id: string): Promise<void> {
