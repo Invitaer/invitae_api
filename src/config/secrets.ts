@@ -28,6 +28,8 @@ export const secrets = {
 
   DASHBOARD_URL: process.env.DASHBOARD_URL,
   USER_DASHBOARD_URL: process.env.USER_DASHBOARD_URL,
+  // Public invitation site (the `templates` app); it only reads public routes.
+  INVITATION_URL: process.env.INVITATION_URL,
   // Public base URL of THIS API, used to build links that land back here from
   // outside the browser session — currently the email-confirmation link.
   // Optional so existing environments keep booting; falls back to localhost.

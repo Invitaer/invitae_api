@@ -14,6 +14,7 @@ function corsOrigins(): string[] {
   return [
     secrets.DASHBOARD_URL ?? 'http://localhost:8090',
     secrets.USER_DASHBOARD_URL ?? 'http://localhost:8091',
+    secrets.INVITATION_URL ?? 'http://localhost:8095',
   ];
 }
 
