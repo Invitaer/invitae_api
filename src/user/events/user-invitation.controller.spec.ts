@@ -147,6 +147,33 @@ describe('UserInvitationController — event member', () => {
   });
 });
 
+describe('UserInvitationController — no session', () => {
+  it('authenticates before checking membership', async () => {
+    const memberGuard = { canActivate: jest.fn(() => true) };
+    const module: TestingModule = await Test.createTestingModule({
+      controllers: [UserInvitationController],
+      providers: [
+        { provide: UserEventsService, useValue: mockUserEventsService },
+        { provide: ContentService, useValue: mockContentService },
+      ],
+    })
+      .overrideGuard(AuthGuard('jwt-user'))
+      .useValue({ canActivate: () => false })
+      .overrideGuard(UserEventMemberGuard)
+      .useValue(memberGuard)
+      .compile();
+    const app = module.createNestApplication();
+    await app.init();
+
+    await request(app.getHttpServer())
+      .get('/user/events/event-uuid-1/invitation')
+      .expect(403);
+
+    expect(memberGuard.canActivate).not.toHaveBeenCalled();
+    await app.close();
+  });
+});
+
 describe('UserInvitationController — not a member of the event', () => {
   let app: INestApplication;
 

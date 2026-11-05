@@ -14,14 +14,16 @@ import { UserEventMemberGuard } from './guards/user-event-member.guard';
  */
 @Controller('user/events/:id/invitation')
 @Auth('user')
-@UseGuards(UserEventMemberGuard)
 export class UserInvitationController {
   constructor(
     private readonly userEventsService: UserEventsService,
     private readonly contentService: ContentService,
   ) {}
 
+  // Method-level on purpose: class guards run first, so the member guard sees
+  // `request.user` only once the JWT guard above has set it.
   @Get()
+  @UseGuards(UserEventMemberGuard)
   async get(
     @Param('id') id: string,
     @CurrentUser() user: AuthUser,
@@ -31,6 +33,7 @@ export class UserInvitationController {
   }
 
   @Put()
+  @UseGuards(UserEventMemberGuard)
   async replace(
     @Param('id') id: string,
     @CurrentUser() user: AuthUser,
