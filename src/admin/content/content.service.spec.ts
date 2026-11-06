@@ -40,7 +40,7 @@ const MOCK_EVENT: Event = {
   userId: 'user-uuid-1',
   name: 'Susan Y Nacho',
   slug: SLUG,
-  date: new Date(2027, 9, 24),
+  date: new Date('2027-10-24T00:00:00Z'),
   eventType: 'wedding',
   location: null,
   createdAt: new Date(2026, 0, 1),

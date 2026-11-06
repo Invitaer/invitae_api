@@ -8,12 +8,13 @@ import { InvitationDto, InvitationSectionDto } from '../admin/content/dto/invita
  * Where the two overlap, these pure functions re-derive the overlapping fields on
  * every read, so stored content can never drift away from the row.
  *
- * TIMEZONE CONTRACT: `events.date` is a `timestamp` WITHOUT timezone, so
- * node-postgres parses it using the Node process timezone. The stored wall clock
- * therefore lives in the LOCAL components of the Date. Every formatter below reads
- * it with local getters (`getFullYear`, `getMonth`, ...). Never use `toISOString()`
- * or `Intl` with a `timeZone` option here: both re-project through UTC and can
- * silently shift the rendered calendar day.
+ * TIMEZONE CONTRACT: `events.date` is a `timestamp` WITHOUT timezone, and drizzle
+ * maps it as UTC both ways (writes `toISOString()`, reads `value + "+0000"`). The
+ * stored wall clock therefore lives in the UTC components of the Date. Every
+ * formatter below reads it with UTC getters (`getUTCFullYear`, `getUTCMonth`, ...).
+ * Never use local getters or `Intl` without `timeZone: 'UTC'` here: both shift the
+ * wall clock by the host offset (UTC-6 in America/Mexico_City renders a stored
+ * midnight on the previous day).
  */
 
 /** Explicit lookup tables — output must not depend on host ICU/locale data. */
@@ -51,41 +52,42 @@ function pad(value: number): string {
 }
 
 function monthName(d: Date): string {
-  return capitalize(MONTHS[d.getMonth()]);
+  return capitalize(MONTHS[d.getUTCMonth()]);
 }
 
 function weekdayName(d: Date): string {
-  return capitalize(WEEKDAYS[d.getDay()]);
+  return capitalize(WEEKDAYS[d.getUTCDay()]);
 }
 
 /** `'Domingo, 24 de Octubre 2027'` — hero headline date. */
 export function formatLongDate(d: Date): string {
-  return `${weekdayName(d)}, ${d.getDate()} de ${monthName(d)} ${d.getFullYear()}`;
+  return `${weekdayName(d)}, ${d.getUTCDate()} de ${monthName(d)} ${d.getUTCFullYear()}`;
 }
 
 /** `'Domingo 24 de Octubre, 2027'` — ceremony/reception venue date. */
 export function formatVenueDate(d: Date): string {
-  return `${weekdayName(d)} ${d.getDate()} de ${monthName(d)}, ${d.getFullYear()}`;
+  return `${weekdayName(d)} ${d.getUTCDate()} de ${monthName(d)}, ${d.getUTCFullYear()}`;
 }
 
 /** `'Octubre · 2027'` — hero side label. */
 export function formatSideLabel(d: Date): string {
-  return `${monthName(d)} · ${d.getFullYear()}`;
+  return `${monthName(d)} · ${d.getUTCFullYear()}`;
 }
 
 /**
- * `'2027-10-24T00:00:00'` — countdown target, built from local getters so the
- * client counts down to the same wall clock that was stored.
+ * `'2027-10-24T00:00:00'` — countdown target. No offset suffix on purpose: the
+ * guest's browser reads it as its own local time, so it counts down to the same
+ * wall clock that was stored.
  */
 export function formatLocalIso(d: Date): string {
-  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}:00`;
+  const date = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+  const time = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:00`;
   return `${date}T${time}`;
 }
 
 /** `'2027'` — footer copyright year. */
 export function formatYear(d: Date): string {
-  return String(d.getFullYear());
+  return String(d.getUTCFullYear());
 }
 
 /**

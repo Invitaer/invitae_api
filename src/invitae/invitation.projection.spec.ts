@@ -1,4 +1,4 @@
-import { Event } from '../database/schema';
+import { Event, events } from '../database/schema';
 import { InvitationDto } from '../admin/content/dto/invitation.dto';
 import {
   formatCelebrantNames,
@@ -10,10 +10,17 @@ import {
   projectInvitation,
 } from './invitation.projection';
 
-// 2027-10-24 is a Sunday. Built with local getters on purpose: `events.date` is a
-// timestamp WITHOUT timezone, so node-postgres hands us a Date whose LOCAL
-// components are the stored wall clock.
-const SUNDAY_24_OCT_2027 = new Date(2027, 9, 24);
+/**
+ * The Date the app actually receives for a stored `events.date` value: built by
+ * the real drizzle column mapping, which reads a timestamp WITHOUT timezone as
+ * UTC. The stored wall clock therefore lives in the UTC components.
+ */
+function fromDb(stored: string): Date {
+  return events.date.mapFromDriverValue(stored) as Date;
+}
+
+// 2027-10-24 is a Sunday.
+const SUNDAY_24_OCT_2027 = fromDb('2027-10-24 00:00:00');
 
 /**
  * Runs `fn` with the process timezone forced to `tz`. Node re-reads process.env.TZ
@@ -59,7 +66,7 @@ describe('invitation.projection — date formatters', () => {
     });
 
     it('zero-pads single-digit month, day, hour and minute', () => {
-      expect(formatLocalIso(new Date(2027, 0, 5, 9, 7))).toBe(
+      expect(formatLocalIso(fromDb('2027-01-05 09:07:00'))).toBe(
         '2027-01-05T09:07:00',
       );
     });
@@ -76,12 +83,13 @@ describe('invitation.projection — date formatters', () => {
   });
 
   describe('the calendar day never shifts with the host timezone', () => {
-    // Local midnight in a POSITIVE-offset zone rolls BACK a day under toISOString().
-    it.each(['UTC', 'Pacific/Kiritimati', 'Europe/Madrid'])(
-      'keeps local midnight on the same calendar day in %s',
+    // Local getters shift the stored wall clock by the host offset: a midnight
+    // rendered the day before in America/Mexico_City (UTC-6).
+    it.each(['UTC', 'Pacific/Kiritimati', 'Europe/Madrid', 'America/Mexico_City'])(
+      'keeps a stored midnight on the same calendar day in %s',
       (tz) => {
         withTimezone(tz, () => {
-          const midnight = new Date(2027, 0, 1);
+          const midnight = fromDb('2027-01-01 00:00:00');
           expect(formatLocalIso(midnight)).toBe('2027-01-01T00:00:00');
           expect(formatLongDate(midnight)).toBe('Viernes, 1 de Enero 2027');
           expect(formatYear(midnight)).toBe('2027');
@@ -89,12 +97,12 @@ describe('invitation.projection — date formatters', () => {
       },
     );
 
-    // A late local hour in a NEGATIVE-offset zone rolls FORWARD a day under toISOString().
-    it.each(['UTC', 'America/Argentina/Buenos_Aires', 'Pacific/Midway'])(
-      'keeps a late evening hour on the same calendar day in %s',
+    // ...and a late hour rolls into the next day in positive-offset zones.
+    it.each(['UTC', 'America/Mexico_City', 'Pacific/Midway', 'Pacific/Kiritimati'])(
+      'keeps a stored late evening hour on the same calendar day in %s',
       (tz) => {
         withTimezone(tz, () => {
-          const lateNight = new Date(2027, 9, 24, 23, 30);
+          const lateNight = fromDb('2027-10-24 23:30:00');
           expect(formatLocalIso(lateNight)).toBe('2027-10-24T23:30:00');
           expect(formatLongDate(lateNight)).toBe('Domingo, 24 de Octubre 2027');
           expect(formatVenueDate(lateNight)).toBe('Domingo 24 de Octubre, 2027');
