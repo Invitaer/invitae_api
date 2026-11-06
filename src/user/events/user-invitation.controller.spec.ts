@@ -60,7 +60,11 @@ class MockJwtGuard {
 }
 
 const mockUserEventsService = { findOne: jest.fn() };
-const mockContentService = { getInvitation: jest.fn(), setInvitation: jest.fn() };
+const mockContentService = {
+  getInvitation: jest.fn(),
+  setInvitation: jest.fn(),
+  getOriginalInvitation: jest.fn(),
+};
 
 async function buildApp(memberGuard: { canActivate: () => boolean }) {
   const module: TestingModule = await Test.createTestingModule({
@@ -137,6 +141,26 @@ describe('UserInvitationController — event member', () => {
     });
   });
 
+  it('GET /original returns the original invitation of the event, projected', async () => {
+    mockContentService.getOriginalInvitation.mockResolvedValue(VALID_INVITATION);
+
+    const res = await request(app.getHttpServer())
+      .get('/user/events/event-uuid-1/invitation/original')
+      .expect(200);
+
+    expect(res.body).toEqual(VALID_INVITATION);
+    expect(mockUserEventsService.findOne).toHaveBeenCalledWith('event-uuid-1', MOCK_USER.id);
+    expect(mockContentService.getOriginalInvitation).toHaveBeenCalledWith(MOCK_EVENT);
+  });
+
+  it('GET /original answers 404 when the event has no original yet', async () => {
+    mockContentService.getOriginalInvitation.mockRejectedValue(new NotFoundException());
+
+    await request(app.getHttpServer())
+      .get('/user/events/event-uuid-1/invitation/original')
+      .expect(404);
+  });
+
   it('PUT rejects a payload that breaks the invitation contract', async () => {
     await request(app.getHttpServer())
       .put('/user/events/event-uuid-1/invitation')
@@ -169,6 +193,10 @@ describe('UserInvitationController — no session', () => {
       .get('/user/events/event-uuid-1/invitation')
       .expect(403);
 
+    await request(app.getHttpServer())
+      .get('/user/events/event-uuid-1/invitation/original')
+      .expect(403);
+
     expect(memberGuard.canActivate).not.toHaveBeenCalled();
     await app.close();
   });
@@ -196,6 +224,14 @@ describe('UserInvitationController — not a member of the event', () => {
       .expect(403);
 
     expect(mockContentService.getInvitation).not.toHaveBeenCalled();
+  });
+
+  it('GET /original is forbidden and reads nothing', async () => {
+    await request(app.getHttpServer())
+      .get('/user/events/event-uuid-1/invitation/original')
+      .expect(403);
+
+    expect(mockContentService.getOriginalInvitation).not.toHaveBeenCalled();
   });
 
   it('PUT is forbidden and writes nothing', async () => {

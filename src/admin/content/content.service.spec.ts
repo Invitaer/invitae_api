@@ -20,6 +20,7 @@ import { InvitationDto } from './dto/invitation.dto';
 
 const mockRedisClient = {
   keys: jest.fn(),
+  set: jest.fn(),
 };
 
 const mockRedisService = {
@@ -205,6 +206,49 @@ describe('ContentService (eventId-keyed Redis)', () => {
   });
 
   // ── getInvitation ─────────────────────────────────────────────────────────────
+
+  describe('original invitation snapshot', () => {
+    const ORIGINAL_KEY = `event:${EVENT_ID}:invitation:original`;
+
+    it('keeps the first stored invitation as the original, without overwriting one', async () => {
+      mockRedisService.get.mockResolvedValue(null);
+
+      await service.setInvitation(MOCK_EVENT, { ...MOCK_INVITATION });
+
+      expect(mockRedisClient.set).toHaveBeenCalledWith(
+        ORIGINAL_KEY,
+        JSON.stringify({ ...MOCK_INVITATION, metadata: { ...MOCK_INVITATION.metadata } }),
+        'NX',
+      );
+    });
+
+    it('snapshots the content stored before this edit when no original exists yet', async () => {
+      const before = JSON.stringify({ ...MOCK_INVITATION, sections: [{ type: 'hero', enabled: true, order: 1, data: {} }] });
+      mockRedisService.get.mockResolvedValue(before);
+
+      await service.setInvitation(MOCK_EVENT, { ...MOCK_INVITATION });
+
+      expect(mockRedisService.get).toHaveBeenCalledWith(`event:${EVENT_ID}:invitation`);
+      expect(mockRedisClient.set).toHaveBeenCalledWith(ORIGINAL_KEY, before, 'NX');
+    });
+
+    it('serves the original projected with the event row, like the live invitation', async () => {
+      mockRedisService.get.mockResolvedValue(
+        JSON.stringify({ ...MOCK_INVITATION, metadata: { ...MOCK_INVITATION.metadata, slug: 'stale' } }),
+      );
+
+      const result = await service.getOriginalInvitation(MOCK_EVENT);
+
+      expect(mockRedisService.get).toHaveBeenCalledWith(ORIGINAL_KEY);
+      expect(result.metadata.slug).toBe(SLUG);
+    });
+
+    it('throws NotFoundException when the event has no original yet', async () => {
+      mockRedisService.get.mockResolvedValue(null);
+
+      await expect(service.getOriginalInvitation(MOCK_EVENT)).rejects.toThrow(NotFoundException);
+    });
+  });
 
   describe('getInvitation', () => {
     it('reads from event:${eventId}:invitation', async () => {

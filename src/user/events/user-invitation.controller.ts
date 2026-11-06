@@ -32,6 +32,16 @@ export class UserInvitationController {
     return this.contentService.getInvitation(event);
   }
 
+  @Get('original')
+  @UseGuards(UserEventMemberGuard)
+  async getOriginal(
+    @Param('id') id: string,
+    @CurrentUser() user: AuthUser,
+  ): Promise<InvitationDto> {
+    const event = await this.userEventsService.findOne(id, user.id);
+    return this.contentService.getOriginalInvitation(event);
+  }
+
   @Put()
   @UseGuards(UserEventMemberGuard)
   async replace(

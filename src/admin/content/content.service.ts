@@ -14,6 +14,10 @@ export class ContentService {
     return `event:${eventId}:invitation`;
   }
 
+  private originalKey(eventId: string): string {
+    return `${this.invKey(eventId)}:original`;
+  }
+
   private contentKey(eventId: string, key: string): string {
     return `${this.CONTENT_PREFIX}${eventId}:${key}`;
   }
@@ -46,8 +50,14 @@ export class ContentService {
   async setInvitation(event: Event, dto: InvitationDto): Promise<InvitationDto> {
     dto.metadata.slug = event.slug;
     dto.metadata.eventType = event.eventType;
+    const value = JSON.stringify(dto);
 
-    await this.redisService.set(this.invKey(event.id), JSON.stringify(dto));
+    // The original is whatever the invitation held first: content stored before
+    // the snapshot existed wins over this edit, and NX never replaces one.
+    const previous = await this.redisService.get(this.invKey(event.id));
+    await this.redisService.client.set(this.originalKey(event.id), previous ?? value, 'NX');
+
+    await this.redisService.set(this.invKey(event.id), value);
     Logger.log(`setInvitation: eventId=${event.id} slug=${event.slug}`);
     return dto;
   }
@@ -59,6 +69,13 @@ export class ContentService {
   async getInvitation(event: Event): Promise<InvitationDto> {
     const raw = await this.redisService.get(this.invKey(event.id));
     if (!raw) throw new NotFoundException(`Invitation for event '${event.id}' not found`);
+    return projectInvitation(JSON.parse(raw) as InvitationDto, event);
+  }
+
+  /** The invitation as first stored, projected like the live one; used to reset an edit. */
+  async getOriginalInvitation(event: Event): Promise<InvitationDto> {
+    const raw = await this.redisService.get(this.originalKey(event.id));
+    if (!raw) throw new NotFoundException(`Original invitation for event '${event.id}' not found`);
     return projectInvitation(JSON.parse(raw) as InvitationDto, event);
   }
 
