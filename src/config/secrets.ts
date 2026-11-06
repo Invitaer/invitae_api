@@ -30,6 +30,9 @@ export const secrets = {
   USER_DASHBOARD_URL: process.env.USER_DASHBOARD_URL,
   // Public invitation site (the `templates` app); it only reads public routes.
   INVITATION_URL: process.env.INVITATION_URL,
+  // Optional comma-separated origins added to the CORS allow-list (e.g. the LAN
+  // IP used to open the frontends from another device).
+  CORS_EXTRA_ORIGINS: process.env.CORS_EXTRA_ORIGINS,
   // Public base URL of THIS API, used to build links that land back here from
   // outside the browser session — currently the email-confirmation link.
   // Optional so existing environments keep booting; falls back to localhost.
